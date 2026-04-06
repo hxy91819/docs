@@ -186,6 +186,84 @@ jobs:
             sleep 5
           done
 
+      - name: Validate and repair locale output
+        id: validate
+        if: steps.pending.outputs.pending_count != '0'
+        env:
+          LOCALE: ${{ inputs.locale }}
+          LOCALE_SLUG: ${{ inputs.locale_slug }}
+        run: |
+          set -euo pipefail
+          pending_file=".openclaw-sync/docs-i18n-${LOCALE_SLUG}.txt"
+          invalid_file=".openclaw-sync/docs-i18n-invalid-${LOCALE_SLUG}.txt"
+          report_file=".openclaw-sync/docs-i18n-report-${LOCALE_SLUG}.json"
+          python scripts/validate_locale_output.py \
+            --docs-root "$GITHUB_WORKSPACE/docs" \
+            --locale "${LOCALE}" \
+            --pending-file "${pending_file}" \
+            --invalid-file "${invalid_file}" \
+            --report-file "${report_file}"
+          invalid_count=$(python - "${invalid_file}" <<'PY'
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          if not path.exists():
+              print(0)
+          else:
+              print(sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()))
+          PY
+          )
+          echo "invalid_count=${invalid_count}" >> "$GITHUB_OUTPUT"
+          echo "Locale validation found ${invalid_count} invalid file(s)."
+
+      - name: Retry invalid locale files
+        if: steps.validate.outputs.invalid_count != '0'
+        env:
+          LOCALE: ${{ inputs.locale }}
+          LOCALE_SLUG: ${{ inputs.locale_slug }}
+          OPENAI_API_KEY: ${{ secrets.OPENCLAW_DOCS_I18N_OPENAI_API_KEY }}
+          OPENCLAW_DOCS_I18N_PROVIDER: openai
+          OPENCLAW_DOCS_I18N_MODEL: gpt-5.4
+          OPENCLAW_DOCS_I18N_PROMPT_TIMEOUT: 10m
+        run: |
+          set -euo pipefail
+          invalid_file=".openclaw-sync/docs-i18n-invalid-${LOCALE_SLUG}.txt"
+          report_file=".openclaw-sync/docs-i18n-report-${LOCALE_SLUG}.json"
+          for attempt in 1 2; do
+            if [ ! -s "${invalid_file}" ]; then
+              echo "No invalid locale files remain after deterministic repair."
+              exit 0
+            fi
+
+            echo "Retrying invalid locale files, attempt ${attempt}/2"
+            mapfile -t DOC_FILES < "${invalid_file}"
+            (
+              cd source/scripts/docs-i18n
+              go run . \
+                --docs "$GITHUB_WORKSPACE/docs" \
+                --lang "${LOCALE}" \
+                --src en \
+                --mode doc \
+                --thinking low \
+                --parallel 4 \
+                --overwrite \
+                "${DOC_FILES[@]}"
+            )
+
+            python scripts/validate_locale_output.py \
+              --docs-root "$GITHUB_WORKSPACE/docs" \
+              --locale "${LOCALE}" \
+              --pending-file "${invalid_file}" \
+              --invalid-file "${invalid_file}" \
+              --report-file "${report_file}"
+          done
+
+          if [ -s "${invalid_file}" ]; then
+            echo "Locale output is still invalid after targeted retries."
+            cat "${invalid_file}"
+            exit 1
+          fi
+
       - name: Commit locale refresh
         env:
           LOCALE: ${{ inputs.locale }}
