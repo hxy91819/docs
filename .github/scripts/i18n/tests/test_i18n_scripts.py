@@ -436,7 +436,18 @@ class I18NScriptTests(unittest.TestCase):
         full = (REPO_ROOT / ".github/workflows/translate-all.yml").read_text(encoding="utf-8")
         incremental = (REPO_ROOT / ".github/workflows/translate-incremental.yml").read_text(encoding="utf-8")
 
-        self.assertIn("npm install -g @openai/codex@0.146.0", reusable)
+        # The Codex CLI pin has one source of truth: toolchain.json. Workflows
+        # must resolve it at runtime; no workflow may embed a version literal.
+        toolchain = json.loads((REPO_ROOT / ".github/scripts/i18n/toolchain.json").read_text(encoding="utf-8"))
+        self.assertRegex(str(toolchain["codex_cli"]), r"^\d+\.\d+\.\d+$")
+        self.assertIn('CODEX_CLI_VERSION="$(jq -r .codex_cli "${I18N_SCRIPT_DIR}/toolchain.json")"', reusable)
+        self.assertIn('npm install -g "@openai/codex@${CODEX_CLI_VERSION}"', reusable)
+        for workflow_path in sorted((REPO_ROOT / ".github/workflows").glob("translate-*.yml")):
+            self.assertIsNone(
+                re.search(r"@openai/codex@\d", workflow_path.read_text(encoding="utf-8")),
+                f"{workflow_path.name} must resolve the Codex CLI version from toolchain.json",
+            )
+
         self.assertIn("effort: xhigh", reusable)
         self.assertNotIn("effort: max", reusable)
         self.assertEqual(1, full.count('thinking_effort: "xhigh"'))

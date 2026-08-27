@@ -142,7 +142,12 @@ jobs:
 
       - name: Install Codex CLI
         if: steps.stale.outputs.skip != 'true'
-        run: npm install -g @openai/codex@0.146.1
+        # Version lives in control-plane toolchain.json so this pin and its
+        # regression test cannot drift apart again.
+        run: |
+          set -euo pipefail
+          CODEX_CLI_VERSION="$(jq -r .codex_cli "${I18N_SCRIPT_DIR}/toolchain.json")"
+          npm install -g "@openai/codex@${CODEX_CLI_VERSION}"
 
       - name: Prune stale locale pages
         if: steps.stale.outputs.skip != 'true'

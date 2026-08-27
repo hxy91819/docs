@@ -100,6 +100,10 @@ Expected behavior:
 
 The weekly run is the repair mechanism for LLM flakiness, partial failures, and missed incremental updates.
 
+## Toolchain pins
+
+Workflow-installed CLIs that translation depends on are pinned in `.github/scripts/i18n/toolchain.json`. That file is the single source of truth: workflows resolve the version at runtime, and `test_translation_workflows_pin_latest_codex_and_tier_effort` asserts the wiring and rejects embedded version literals. To upgrade a pinned CLI, edit `toolchain.json` only. The weekly `Translate Full` run also includes a warn-only freshness job comparing pins against the npm registry.
+
 ## Deployment policy
 
 English deploys from source sync commits.

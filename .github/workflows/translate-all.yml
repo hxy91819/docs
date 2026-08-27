@@ -78,6 +78,36 @@ jobs:
     name: Validate workflow shell blocks
     uses: ./.github/workflows/translate-shell-check-reusable.yml
 
+  # Warn-only drift signal. An outdated pin is not broken, so this must not
+  # fail scheduled runs; it surfaces the update in annotations and the summary.
+  toolchain-freshness:
+    name: Check pinned toolchain freshness
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7.0.1
+        with:
+          sparse-checkout: .github/scripts/i18n/toolchain.json
+          persist-credentials: false
+
+      - name: Compare pinned Codex CLI with registry latest
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          pinned="$(jq -r .codex_cli .github/scripts/i18n/toolchain.json)"
+          latest="$(npm view @openai/codex version)"
+          echo "Pinned Codex CLI: ${pinned}"
+          echo "Registry latest: ${latest}"
+          {
+            echo "### Toolchain freshness"
+            echo "- Pinned Codex CLI: `${pinned}`"
+            echo "- Registry latest: `${latest}`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${pinned}" != "${latest}" ]; then
+            echo "::warning::toolchain.json pins @openai/codex ${pinned} but npm ships ${latest}. Validate the new CLI against a translation shard, then bump toolchain.json."
+          fi
+
   prepare:
     name: Debounce and pick source
     needs: validate-workflow-shell
