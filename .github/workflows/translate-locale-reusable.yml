@@ -291,7 +291,6 @@ jobs:
           effort: xhigh
           sandbox: workspace-write
           safety-strategy: drop-sudo
-          codex-args: '["--full-auto"]'
 
       - name: Enforce translated MDX repair scope
         id: mdx_scope
