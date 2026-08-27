@@ -84,38 +84,17 @@ Keep the token out of repository config and shell arguments.
 
 ### Daytona
 
-The bundled Crabbox provider can also lease [Daytona](https://www.daytona.io) sandboxes as cloud workers (`settings.provider: "daytona"`). Unlike AWS, Daytona needs no separate `crabbox login` step: export `DAYTONA_API_KEY` (from the [Daytona dashboard](https://app.daytona.io/dashboard/keys)) in the Gateway process's environment before Crabbox allocates a lease. Verify it without provisioning anything:
+<Warning>
+Direct Daytona cloud-worker dispatch is currently unsupported. OpenClaw requires a non-empty `settings.class` and forwards it as `--class`, but Crabbox's direct Daytona backend rejects that flag because the snapshot controls sizing. Omitting the class fails OpenClaw's profile validation; setting it to `beast` or another value does not resolve the incompatibility.
+</Warning>
 
-```bash
-DAYTONA_API_KEY=<key> crabbox doctor --provider daytona --json
-```
-
-A `daytona-fallback auth=ready control_plane=ready inventory=ready` finding confirms the key authenticates; `mutation=false` means the check is read-only. Daytona leases are Linux-only (`target: linux`) and reachable over SSH like any other Crabbox `ssh-lease` provider. Crabbox's default Daytona snapshot already ships Node.js and `npx`, so `settings.setup` is optional here — keep it only if your own snapshot needs it, as an idempotent guard like the AWS example above.
-
-```json
-{
-  "cloudWorkers": {
-    "profiles": {
-      "daytona": {
-        "provider": "crabbox",
-        "install": "bundle",
-        "settings": {
-          "provider": "daytona",
-          "class": "beast",
-          "ttl": "8h",
-          "idleTimeout": "45m"
-        }
-      }
-    }
-  }
-}
-```
-
-`class` defaults to `beast` (Crabbox's own default for this provider) when omitted; `crabbox providers describe daytona --json` lists the full flag set. Provide `DAYTONA_API_KEY` as an environment variable on the Gateway process (for example through a systemd `EnvironmentFile`), the same way other credential-bearing provider secrets are supplied — never in `openclaw.json` itself.
+Use another supported backend, such as the AWS profile in [Configuration](/gateway/cloud-workers#configuration), for cloud-worker sessions until this integration is compatible. For standalone Crabbox usage, see its [Daytona provider documentation](https://github.com/openclaw/crabbox/blob/main/docs/providers/daytona.md); those instructions are not an OpenClaw cloud-worker setup recipe.
 
 ## Configuration
 
 Manage profiles in the Control UI under **Settings → Connections → Cloud workers**, or edit `cloudWorkers.profiles` directly in `openclaw.json` — both write the same config keys. The settings page lists each profile's backend, class, lifetime, and idle-stop in plain language, and shows whether it is advertised to `environments.list` or waiting on a Gateway restart. With no profiles configured it explains the feature, links back to this page, and starts the add flow.
+
+**Machine class** is a required text field. Enter a class accepted by the selected Crabbox backend and binary; the provider determines its effective sizing. Changing the backend or binary leaves the class unchanged, so verify that it is accepted before saving.
 
 Add a profile under `cloudWorkers.profiles` in `openclaw.json`:
 
@@ -327,7 +306,11 @@ openclaw gateway call sessions.dispatch \
   --params '{"key":"agent:main:big-refactor","profileId":"aws","machineClass":"large"}'
 ```
 
-The bundled Crabbox provider advertises whatever machine classes the configured Crabbox binary reports for the selected backend, preserving Crabbox's size order. For example, a catalog containing `tiny`, `small`, `standard`, `fast`, `large`, and `beast` produces those six picker rows in that order; if Crabbox reports `standard` as 32 vCPU · 64 GB, that shape appears beside the class. Older binaries that publish no matching class catalog retain the label-only `standard`, `fast`, `large`, and `beast` fallback. You can also pass a provider-native server or instance type such as `c7a.24xlarge`; Crabbox treats any other non-empty class as that exact type. The selected value is fixed for that placement and reused by safe provisioning retries. `machineClass` is valid only with `profileId`, not `deviceId`.
+The bundled Crabbox provider advertises usable legacy `classes` reported by `crabbox providers --json` for the selected backend, preserving their order and marking the configured class as the default. The picker includes at most 32 options; it appends the configured class only when a usable advertised list exists. Reported vCPU and RAM appear independently; missing dimensions stay unknown. An explicit `classCatalog.disposition: unmapped` suppresses class choices even if legacy `classes` are also present. Missing, failed, empty, or unusable metadata produces no machine selector, not generic fallback choices. The cloud profile remains selectable, and dispatch or Move without an override preserves its configuration.
+
+Successful catalogs, including valid empty catalogs, are cached for the Gateway lifetime. Failed probes are retried by the next discovery request; a Gateway restart is not needed to recover.
+
+A rich static `classCatalog` or a provider-native size catalog alone does not establish a usable picker override. For example, newer Crabbox versions report mapped Machine0 aliases but deliberately omit legacy `classes` because an explicitly configured native size takes precedence. OpenClaw does not flatten those profiles or translate native sizes into classes. Keep native size selection in Crabbox's configuration; the picker cannot override it or promise a resize. Acceptance of native server types through `machineClass` is backend-specific, not a universal Crabbox contract. An admitted machine choice remains fixed for that placement and is reused by provisioning retries; catalog changes do not rewrite it. `machineClass` is valid only with `profileId`, not `deviceId`.
 
 `sessions.dispatch` closes local turn admission, drains active work, validates the eligible Git workspace inventory, provisions the lease for the selected execution mode, runs setup, enrolls the node, pushes the required pinned Gateway bundle, syncs the workspace, and returns once the placement reaches `active` ownership. Inventory validation happens before provider allocation and reports an invalid request with an actionable size or entry limit when the workspace cannot be dispatched. Budget several minutes for the first cloud dispatch; leases and content-addressed bundles are reused where safe. After that, talk to the session as usual. OpenClaw turns route to the worker process; Codex native operations run on the authorized cloud node, paired device, or supported SSH-backed provider.
 
@@ -339,7 +322,7 @@ Apply uses the dispatch-time manifest as the merge base. Cloud-only changes are 
 
 While a fenced result is still reconciling, a new turn waits up to 15 seconds for the prior claim to release. If it is still busy, the turn fails with an actionable “previous cloud turn's workspace result is still reconciling” message and can be retried shortly. On restart, recovery discovers pending and staged results before stale-claim cleanup, completes or retries their local apply, and reclaims dead environments only after preserving the result. The bounded SQLite rollback journal makes an interrupted filesystem apply recoverable without replaying already accepted mutations.
 
-To continue the same session somewhere else, open the **Runs on Cloud** chip and choose **Move session…**. An operator with `operator.write` can select the Gateway or an eligible paired device; selecting a configured cloud profile requires `operator.admin`. Profiles may also offer a machine class. Moving to the current profile with a different class resizes the session by replacing its worker. The Gateway closes new admission, interrupts any active turn, reconciles the source workspace, destroys the old environment, and then activates the destination. An interrupted turn is never replayed: partial output may disappear, and you send the next turn again after the move. The exact target, including a machine override, and bounded errors are durable, so the Control UI shows **Moving to…** or the recovery error after a reconnect. If the Gateway restarts before the destination becomes active, request-bound authority is lost: recovery finishes safe source cleanup, marks the placement failed with a retry message, and does not provision the destination. Reconnect, then choose **Move session…** again.
+To continue the same session somewhere else, open the **Runs on Cloud** chip and choose **Move session…**. An operator with `operator.write` can select the Gateway or an eligible paired device; selecting a configured cloud profile requires `operator.admin`. Profiles may also offer a machine class. Moving to the current profile with a different effective class replaces its worker; it is not an in-place resize, and native size overrides may take precedence over classes. The Gateway closes new admission, interrupts any active turn, reconciles the source workspace, destroys the old environment, and then activates the destination. An interrupted turn is never replayed: partial output may disappear, and you send the next turn again after the move. The exact target, including a machine override, and bounded errors are durable, so the Control UI shows **Moving to…** or the recovery error after a reconnect. If the Gateway restarts before the destination becomes active, request-bound authority is lost: recovery finishes safe source cleanup, marks the placement failed with a retry message, and does not provision the destination. Reconnect, then choose **Move session…** again.
 
 An active paired-device placement stays `active` when its runner disconnects.
 Control UI shows **Device offline** and **Waiting for device to reconnect; retry

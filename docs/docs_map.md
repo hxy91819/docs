@@ -3026,13 +3026,14 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
 - Route: /concepts/presence
 - Headings:
   - H2: Presence fields (what shows up)
+  - H3: Watched session references
   - H2: Producers (where presence comes from)
   - H3: 1) Gateway self entry
   - H3: 2) WebSocket connect
   - H4: Why ephemeral control-plane connections do not show up
   - H3: 3) system-event beacons
   - H3: 4) Node connects (role: node)
-  - H2: Merge + dedupe rules (why instanceId matters)
+  - H2: Connection rows and beacon deduplication
   - H2: TTL and bounded size
   - H2: Remote/tunnel caveat (loopback IPs)
   - H2: Consumers
@@ -3440,6 +3441,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: exec tool
   - H3: Env overrides
   - H3: Config (preferred over env overrides)
+  - H2: Worker environments
   - H2: Child process bridging
   - H2: process tool
   - H2: Examples
@@ -8792,6 +8794,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
 - Headings:
   - H2: Three ways to use Copilot in OpenClaw
   - H2: GitHub Enterprise (data residency)
+  - H3: Tenant request identity
   - H2: Optional flags
   - H2: Non-interactive onboarding
   - H2: Memory search embeddings
@@ -9498,6 +9501,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Preflight a target release
   - H2: Agent schema history
   - H2: State schema history
+  - H3: State schema 13
   - H3: State schema 11
   - H3: State schema 9
   - H2: Integrity checks
@@ -9506,6 +9510,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: The Gateway refuses to start with a newer schema version error
   - H3: A database is quarantined after integrity verification failed
   - H2: Downgrades are unsupported
+  - H3: Example: state schema 13 to 12
   - H3: Example: state schema 12 to 11
   - H3: Example: state schema 11 to 10
   - H3: Example: state schema 10 to 9
