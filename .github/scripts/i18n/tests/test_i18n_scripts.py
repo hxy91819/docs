@@ -450,6 +450,7 @@ class I18NScriptTests(unittest.TestCase):
             )
 
         self.assertIn("effort: xhigh", reusable)
+        self.assertIn('go-version: "1.26"', reusable)
         self.assertNotIn("effort: max", reusable)
         self.assertEqual(1, full.count('thinking_effort: "xhigh"'))
         self.assertEqual(6, full.count("thinking_effort: ${{ inputs.translation_effort || 'xhigh' }}"))
