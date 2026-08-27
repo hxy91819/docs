@@ -6604,6 +6604,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Use the Control UI
   - H2: List and search plugins
   - H2: Enable and disable plugins
+  - H2: Capability consent
   - H2: Install plugins
   - H2: Restart and inspect
   - H2: Update plugins
