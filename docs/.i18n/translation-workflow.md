@@ -102,7 +102,7 @@ The weekly run is the repair mechanism for LLM flakiness, partial failures, and 
 
 ## Toolchain pins
 
-Workflow-installed CLIs that translation depends on are pinned in `.github/scripts/i18n/toolchain.json`. That file is the single source of truth: workflows resolve the version at runtime, and `test_translation_workflows_pin_latest_codex_and_tier_effort` asserts the wiring and rejects embedded version literals. To upgrade a pinned CLI, edit `toolchain.json` only. The weekly `Translate Full` run also includes a warn-only freshness job comparing pins against the npm registry.
+Workflow-installed tools that translation depends on are pinned in `.github/scripts/i18n/toolchain.json`. That file is the single source of truth for the Codex CLI and Go runner versions: workflows resolve both at runtime, and `test_translation_workflows_pin_latest_codex_and_tier_effort` asserts the wiring and rejects embedded version literals. To upgrade a pinned toolchain, edit `toolchain.json` only. The weekly `Translate Full` run also includes a warn-only freshness job comparing the Codex CLI pin against the npm registry.
 
 ## Deployment policy
 

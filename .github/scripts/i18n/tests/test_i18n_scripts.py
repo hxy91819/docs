@@ -440,7 +440,9 @@ class I18NScriptTests(unittest.TestCase):
         # must resolve it at runtime; no workflow may embed a version literal.
         toolchain = json.loads((REPO_ROOT / ".github/scripts/i18n/toolchain.json").read_text(encoding="utf-8"))
         self.assertRegex(str(toolchain["codex_cli"]), r"^\d+\.\d+\.\d+$")
+        self.assertRegex(str(toolchain["go_version"]), r"^\d+\.\d+$")
         self.assertIn('CODEX_CLI_VERSION="$(jq -r .codex_cli "${I18N_SCRIPT_DIR}/toolchain.json")"', reusable)
+        self.assertIn('GO_VERSION="$(jq -r .go_version "${I18N_SCRIPT_DIR}/toolchain.json")"', reusable)
         self.assertIn('npm install -g "@openai/codex@${CODEX_CLI_VERSION}"', reusable)
         self.assertIn("sparse-checkout-cone-mode: false", full)
         for workflow_path in sorted((REPO_ROOT / ".github/workflows").glob("translate-*.yml")):
@@ -450,7 +452,7 @@ class I18NScriptTests(unittest.TestCase):
             )
 
         self.assertIn("effort: xhigh", reusable)
-        self.assertIn('go-version: "1.26"', reusable)
+        self.assertIn('go-version: "${{ env.GO_VERSION }}"', reusable)
         self.assertNotIn("effort: max", reusable)
         self.assertEqual(1, full.count('thinking_effort: "xhigh"'))
         self.assertEqual(6, full.count("thinking_effort: ${{ inputs.translation_effort || 'xhigh' }}"))
