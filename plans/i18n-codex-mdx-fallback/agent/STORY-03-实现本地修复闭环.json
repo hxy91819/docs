@@ -1,0 +1,54 @@
+{
+  "kind": "agent-card",
+  "schema_version": 1,
+  "story": "STORY-03",
+  "title": "实现本地修复闭环",
+  "epic": "EPIC-I18N-MDX-CODEX-FALLBACK",
+  "gate": "COMPONENT",
+  "depends_on": [
+    "STORY-02"
+  ],
+  "intent_version": 3,
+  "status": "blocked",
+  "owner": "待领取",
+  "blocker": "STORY-02 未完成",
+  "status_updated": "2026-09-01",
+  "refreshed": "待领取",
+  "code_baseline": "待领取",
+  "owns": [
+    "LOCAL_LOOP"
+  ],
+  "verifies": [],
+  "acceptance_cases": [
+    "GC-02",
+    "GC-03",
+    "GC-04"
+  ],
+  "goal": "交付仅用于实验的独立本地驱动，主比较无辅助与增强现有 Codex action；按需单独探测 Prettier/PR #153 并保存可复盘证据；不自动接入生产。",
+  "decision_boundary": "模块不依赖 GitHub Actions；真实 Codex 测试显式 opt-in；超时和重试可配置且不伪装成已验证结论；只允许一个 Codex action；本 Story 不得修改正式翻译工作流或生成 locale 页面。",
+  "technical_plan": "按 STORY-02 契约实现本地实验驱动；主臂调用增强现有 action，辅助臂仅在临时副本运行固定版 Prettier 或已有 PR #153，失败即回到同一 action；运行离线 mock 与真实 Codex CLI，记录阶段顺序、冲突、耗时、重试、成本和内容安全，不做默认组合矩阵。",
+  "authoritative_inputs": "STORY-02 执行卡；agent/实验契约.json；当前基线；.openclaw-sync/docs-mdx-repair.md；translate-locale-reusable.yml；PR #153 与 Prettier 探测证据；本地 Codex CLI 文档和环境。",
+  "claim_checks": "确认模块边界和 fixture 版本；确认 action/辅助版本、真实测试开关、凭据来源和清理方式；确认主实验不依赖可选辅助且不会写入生产工作流。",
+  "checklist": [
+    {
+      "done": false,
+      "text": "实现独立模块入口"
+    },
+    {
+      "done": false,
+      "text": "覆盖离线成功与越界反馈"
+    },
+    {
+      "done": false,
+      "text": "接通真实 Codex opt-in 测试"
+    },
+    {
+      "done": false,
+      "text": "保存结构化日志与回放证据"
+    }
+  ],
+  "steps": "1. 实现本地驱动；判据：无 CI 也能跑 fixture。\n2. 加入 checker feedback；判据：失败错误回到同一会话。\n3. 跑真实集成；判据：有凭据时产生可编译结果，无凭据时状态可分类。",
+  "verification": "离线测试命令、真实测试命令/退出码、日志路径和 fixture 结果。",
+  "stop_conditions": "若 Agent 修改范围无法被 checker 或 parser 验收、辅助不能在临时副本安全丢弃、或实验不能区分增强 action 与辅助贡献，停止并回到契约修订；不得绕过 STORY-03.1 进入生产。",
+  "handoff": "交接时记录 Story、清单计数、基线、命令/退出码、证据路径、Git 状态和下一 Story 输入。"
+}

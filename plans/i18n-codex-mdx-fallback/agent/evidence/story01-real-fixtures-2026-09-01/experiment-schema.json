@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "purpose": "最小可比较记录；每个 fixture 至少有 no_assistance 实测，其余臂可在 STORY-02/03 回放",
+  "arms": {
+    "no_assistance": "严格 MDX 编译，不调用 checker/formatter/Codex",
+    "enhanced_existing_codex_action": "增强现有 .openclaw-sync/docs-mdx-repair.md + workflow 的单一 Codex action",
+    "checker_interception": "严格 checker 在 repair action 前拦截；不修改输入",
+    "final_failure": "最终仍未通过严格 parser 或内容门禁；必须保留失败 artifact/日志"
+  },
+  "record_fields": {
+    "fixture_id": "string",
+    "run_id": "string|null",
+    "locale": "string",
+    "source_path": "string",
+    "arm": "enum(no_assistance, enhanced_existing_codex_action, checker_interception)",
+    "repair_mode": "string|null",
+    "auxiliary_version": "string|null",
+    "parser": "string",
+    "parser_outcome": "enum(compile_success, compile_failure, not_run)",
+    "error": "object|null",
+    "content_check": "enum(pass, fail, not_applicable_before_repair, not_run)",
+    "repair_attempts": "integer|null",
+    "rounds": "integer|null",
+    "duration_ms": "number|null",
+    "exit_code": "integer|null",
+    "status": "enum(success, checker_intercepted, final_failure, not_run)"
+  },
+  "success_rate_definition": "success = parser_outcome=compile_success AND content_check=pass; final_failure = parser failure after allowed attempts OR content_check=fail; checker_intercepted is a separate counted outcome; not_run is excluded from denominator",
+  "timeout_policy": "记录实际耗时和轮次；不在 STORY-01 预设 timeout/retry 数值。"
+}

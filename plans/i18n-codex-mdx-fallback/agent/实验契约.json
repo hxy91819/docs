@@ -1,0 +1,157 @@
+{
+  "kind": "agent-reference",
+  "schema_version": 1,
+  "id": "experiment-contract",
+  "title": "实验契约",
+  "updated": "2026-09-01",
+  "body": {
+    "scope": "先验证真实流水线 fixture、增强现有 Codex repair action（唯一 Agent）、轻量灾难性越界检查、同会话反馈、可选 Prettier/PR #153 辅助和 GitHub runner；不在实验完成及用户决策前固定生产实现，也不在规划阶段固定超时、重试或语义检查阈值。",
+    "model": "Codex Agent + Luna model + max reasoning effort（实验组合，最终标识以可用环境为准）。",
+    "existing_action": {
+      "prompt": ".openclaw-sync/docs-mdx-repair.md",
+      "workflow": ".github/workflows/translate-locale-reusable.yml",
+      "role": "唯一 workspace-writing Codex repair executor；本次增强触发、同会话反馈、轻量 checker、有限尝试和结构化日志，不新增第二个 Codex action",
+      "revalidation": [
+        "完整页面严格 MDX 诊断能传给同一 action",
+        "checker 或外部 recheck 拒绝时能在有界预算内回传同一会话",
+        "scope、protected-attribute 和最终 parser gate 仍在 action 外部复验"
+      ]
+    },
+    "candidate_pr": {
+      "id": "PR-153",
+      "url": "https://github.com/openclaw/docs/pull/153",
+      "head": "4d37f029f0c49d7745913a9e20c3099cd90f2517",
+      "base": "openclaw/docs:main",
+      "role": "可选 parser-guided syntax-repair 对照；不是第二个 Agent，也不是默认生产依赖",
+      "provisional_status": "仅在固定 fixture 上做有界 A/B；默认不合并、不继续扩张自研规则",
+      "required_revalidation": [
+        "针对最新目标 main 完成 rebase 或等价合并测试",
+        "重跑已有 14-case matrix 和打包顺序测试，解释失败归属",
+        "只在能证明净收益且维护成本可接受时提交用户决策；否则保留为历史证据"
+      ]
+    },
+    "prettier_candidate": {
+      "package": "prettier",
+      "probe_version": "3.9.6",
+      "role": "可选一次性 formatter aid；不是语法修复 oracle，不替代 Codex 或严格 MDX parser",
+      "provisional_status": "只对单文件临时副本实验，默认不加入仓库依赖",
+      "probe_result": "初步探测未修复本次五类损坏；合法嵌套 MDX 可格式化。详见 agent/evidence/prettier-mdx-probe-2026-09-01.md。",
+      "required_revalidation": [
+        "固定版本并记录 parser 配置及格式漂移",
+        "输出必须通过严格 MDX、轻量内容检查和 protected-attribute 检查",
+        "失败或无净收益时丢弃临时输出并回到现有 Codex action"
+      ]
+    },
+    "alternative_candidates": [
+      {
+        "id": "@takazudo/mdx-formatter",
+        "probe_version": "1.3.0-next.4",
+        "role": "MDX-aware formatter candidate; not a repair oracle",
+        "probe_result": "Five malformed synthetic samples were returned unchanged when parsing failed; see agent/evidence/mdx-formatter-probe-2026-09-01.md.",
+        "posture": "Do not add a new experiment arm or dependency unless real fixtures show a format-only net benefit; if tested, use a pinned temporary copy and all existing gates."
+      },
+      {
+        "id": "@markdownkit/markdownkit",
+        "probe_version": "2.3.2",
+        "role": "Remark-based MDX formatter/linter candidate",
+        "probe_result": "One mixed malformed sample failed during parsing and formatted 0 of 1 files; this is not sufficient evidence for broader behavior.",
+        "posture": "Research only; no default dependency or new experiment arm without a concrete real-fixture question."
+      },
+      {
+        "id": "tree-sitter-plus-mdx-grammar",
+        "role": "Future tolerant-diagnostic research candidate",
+        "posture": "ERROR/MISSING nodes may improve location reporting, but a grammar and repair policy are still required; no production use or new primary arm in this phase."
+      },
+      {
+        "id": "lint-and-markdown-formatters",
+        "examples": [
+          "markdownlint-cli2",
+          "remark-lint",
+          "eslint-mdx",
+          "mdformat",
+          "dprint-plugin-markdown"
+        ],
+        "role": "Style linting or formatting for valid Markdown/MDX",
+        "posture": "Not a structural MDX repair path; keep out of the fallback experiment unless a separate, concrete question is approved."
+      }
+    ],
+    "comparison_arms": [
+      "current-baseline（必做）：现有工作流，不启用增强，记录原始失败与保留率",
+      "enhanced-existing-codex（必做）：只增强现有 Codex action，不启用非 Agent 辅助，作为主比较臂",
+      "enhanced-plus-prettier（可选）：临时副本先试固定版 Prettier，未通过门禁即回到同一 Codex action；可跳过",
+      "enhanced-plus-pr153（可选）：临时/受控前置试 PR #153，规则未覆盖、冲突或无净收益即回到同一 Codex action；可跳过"
+    ],
+    "required_order": [
+      "完整页面组装",
+      "严格 @mdx-js/mdx parser/oracle 产生完整诊断",
+      "可选辅助（none、固定版 Prettier 或 PR #153；仅在显式实验臂启用时运行）",
+      "增强后的现有 Codex repair action（唯一 Agent 执行器）",
+      "轻量 checker、scope 和 protected-attribute 检查；拒绝时把具体错误回传同一会话并消耗有界尝试",
+      "外部严格 MDX recheck 与 artifact 门禁；仍失败则显式 per-file/per-shard failure"
+    ],
+    "user_decision_gate": {
+      "after": "STORY-03 本地实验和 STORY-03.1 可行性汇总",
+      "before": "STORY-04 正式流水线接入",
+      "required": "用户已确认“增强现有 action、只保留一个 Codex 执行入口”的方向；实验后还需明确是否启用任一辅助、固定参数和回退条件，或要求补实验",
+      "until_decided": "不得修改正式工作流、启用未经批准的辅助或发布线上；实验代码和 fixture-only CI 可以继续",
+      "if_more_experiments": "回到 STORY-03，保留已有证据，不把方向确认误写成生产授权"
+    },
+    "baseline_evidence": [
+      "run 27629404260：约 8h48m，21 个 metadata-only 失败 artifact；zh-CN 14/14、zh-TW 7 个已完成 shard 失败。",
+      "run 28273967200：artifact/main 已有 LINE，但 R2 线上仍显示 行，说明发布路径也必须纳入实验。",
+      "现有 action：.openclaw-sync/docs-mdx-repair.md + openai/codex-action@v1；当前只有一次 action 调用，尚无工作流级同会话反馈循环。",
+      "PR #153 本地分支：4d37f029f0，相对 upstream/main ahead 1、behind 26；local pytest 为 106 passed、2 failures，需在复验中确认归属。",
+      "Prettier@3.9.6 探测：五类损坏仍无法通过 @mdx-js/mdx@3.1.1；合法嵌套 MDX 通过。"
+    ],
+    "measurements": [
+      "修复成功率",
+      "MDX 通过率",
+      "灾难性删除拦截率",
+      "误拦截样本",
+      "增强 action 与各辅助的增量成功率",
+      "同会话反馈轮次与阶段冲突率",
+      "单文件耗时",
+      "Codex 轮次",
+      "token/成本",
+      "人工介入率",
+      "同 shard 成功页面保留率"
+    ],
+    "required_logs": [
+      "fixture_id",
+      "source_revision",
+      "experiment_arm",
+      "agent_action_version",
+      "optional_aid/version",
+      "repair_stage_order",
+      "parser_diagnostics",
+      "codex_session/attempt",
+      "checker_result",
+      "changed_paths",
+      "elapsed_ms",
+      "final_outcome"
+    ],
+    "fixture_priority": [
+      "真实 artifact/log 回放",
+      "真实 MDX 损坏页面",
+      "现有 Codex action 失败诊断与反馈样本",
+      "PR #153 的 14-case matrix（仅作可选对照 fixture）",
+      "Prettier 合法/非法输入对照（固定版本）",
+      "合成边界案例"
+    ],
+    "stop_rules": [
+      "未能保留原始输入和诊断时停止实验",
+      "出现整篇删除未被拦截时停止扩大范围",
+      "PR head、Prettier 版本或目标基线漂移且无法复现时停止比较并回到复验",
+      "发现辅助或 Codex action 绕过严格 parser、scope 或 protected-attribute gate 时停止接入",
+      "任何方案试图新增第二个 Codex action、盲目全 locale formatter --write 或无界重试时停止",
+      "无法回退或越过允许路径时停止接入生产；用户尚未完成 USER_DECISION 时停止正式实现"
+    ],
+    "evidence_policy": "原始文档正文和密钥默认不写日志；需要复盘时保存脱敏快照和 hash，并记录 action/辅助版本、诊断、退出码和副作用。",
+    "experiment_policy": {
+      "primary": "必须比较 current-baseline 与 enhanced-existing-codex；这是唯一进入可行性结论的必做对照。",
+      "optional": "Prettier 与 PR #153 各自最多作为单独、显式启用的辅助臂；没有代表 fixture 或成本不合理时可跳过并记录原因。",
+      "combinations": "默认不做辅助之间或与其他阶段的组合矩阵；只有主实验发现具体冲突问题时才追加最小复验。",
+      "production_default": "仅增强现有 Codex action；任何辅助都须有净收益、固定版本/回退条件和用户批准。"
+    }
+  }
+}

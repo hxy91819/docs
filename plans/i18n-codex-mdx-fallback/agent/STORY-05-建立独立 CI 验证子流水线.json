@@ -1,0 +1,53 @@
+{
+  "kind": "agent-card",
+  "schema_version": 1,
+  "story": "STORY-05",
+  "title": "建立独立 CI 验证子流水线",
+  "epic": "EPIC-I18N-MDX-CODEX-FALLBACK",
+  "gate": "COMPONENT",
+  "depends_on": [
+    "STORY-04"
+  ],
+  "intent_version": 3,
+  "status": "blocked",
+  "owner": "待领取",
+  "blocker": "STORY-04 未完成",
+  "status_updated": "2026-09-01",
+  "refreshed": "待领取",
+  "code_baseline": "待领取",
+  "owns": [
+    "CI_VALIDATION"
+  ],
+  "verifies": [],
+  "acceptance_cases": [
+    "GC-04",
+    "GC-05"
+  ],
+  "goal": "交付可独立触发的 GitHub CI 子流水线，用真实 runner 验证单一 Codex action、可选辅助、工具链、权限和日志。",
+  "decision_boundary": "默认只处理版本化 fixture 和证据，不提交生产分支、不发布线上；真实 Codex 测试需显式开关；CI 必须使用用户批准且已复验的 action/辅助组合，未有决策时只能运行 fixture-only。",
+  "technical_plan": "新增 workflow_dispatch/workflow_call 入口；固定批准的 action、可选辅助版本、目标基线和与正式任务一致的 Node/Codex/MDX 工具链；分别运行离线模块测试和可选真实 Codex 测试；验证单一 action、辅助回退、checker/parser 顺序；上传脱敏 evidence 并区分离线、Agent、环境失败。",
+  "authoritative_inputs": "STORY-04 交接；STORY-03.1 决策包；.github/workflows/；.github/scripts/i18n/；agent/黄金验收.json；PR #153/Prettier 固定实验资料；GitHub Actions 权限文档。",
+  "claim_checks": "确认用户批准的 action/辅助版本、secrets、runner、权限、预算和 artifact 保留策略；验证分支运行不污染生产；记录单一 action 与工具链版本。",
+  "checklist": [
+    {
+      "done": false,
+      "text": "建立 fixture-only CI 路径"
+    },
+    {
+      "done": false,
+      "text": "加入可选真实 Agent 路径"
+    },
+    {
+      "done": false,
+      "text": "验证证据 artifact 与失败分类"
+    },
+    {
+      "done": false,
+      "text": "单独触发并回放 runner 结果"
+    }
+  ],
+  "steps": "1. 运行离线子流水线；判据：无 secret 也有完整结果。\n2. 运行真实路径；判据：Codex、辅助和环境失败可区分。\n3. 下载证据；判据：日志、diff、阶段顺序和退出码齐全。",
+  "verification": "workflow run URL、job summary、artifact 列表和权限检查结果。",
+  "stop_conditions": "若 CI 需要生产写权限才能测试模块、出现第二个 Codex action 或辅助绕过最终 parser/scope gate，停止并调整隔离设计。",
+  "handoff": "交接时记录 Story、清单计数、基线、命令/退出码、证据路径、Git 状态和下一 Story 输入。"
+}

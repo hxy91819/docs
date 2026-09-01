@@ -1,0 +1,50 @@
+{
+  "kind": "agent-card",
+  "schema_version": 1,
+  "story": "STORY-01",
+  "title": "建立真实故障基线",
+  "epic": "EPIC-I18N-MDX-CODEX-FALLBACK",
+  "gate": "READY",
+  "depends_on": [],
+  "intent_version": 3,
+  "status": "done",
+  "owner": "codexp",
+  "blocker": "无",
+  "status_updated": "2026-09-01",
+  "refreshed": "2026-09-01",
+  "code_baseline": "4d37f029f0c49d7745913a9e20c3099cd90f2517",
+  "owns": [
+    "REAL_FIXTURES"
+  ],
+  "verifies": [],
+  "acceptance_cases": [
+    "GC-01"
+  ],
+  "goal": "从历史翻译运行提取并冻结真实 MDX 失败样本、oracle、内容保留判据和主实验测量格式；可选辅助只做低成本对照。",
+  "decision_boundary": "只读取历史运行、现有脚本和 fixture；不得修改生成 locale 页面或正式工作流。增强现有 Codex action 的方向已确认；主实验比较基线与增强 action，PR #153/Prettier 只在必要时探测，正式辅助去留留给 STORY-03.1。",
+  "technical_plan": "审阅历史运行、现有 Codex repair action、PR #153、Prettier 探测、docs/.i18n/translation-workflow.md、现有 i18n 测试和源仓库翻译器；回放真实失败；在 agent/evidence/ 保存脱敏 fixture、版本、parser 诊断和主/可选实验说明。",
+  "authoritative_inputs": "当前基线：plans/i18n-codex-mdx-fallback/agent/当前基线.json；Epic 全局设计；现有 handoff；现有 i18n 测试；源仓库/工作流运行 artifact；Prettier 探测证据。",
+  "claim_checks": "确认真实日志来源、现有 action 入口、PR head/Prettier 版本、fixture 脱敏状态、测试失败归属和 GC-01 oracle；确认可选探测不阻塞主实验。",
+  "checklist": [
+    {
+      "done": true,
+      "text": "检索并分类真实失败日志"
+    },
+    {
+      "done": true,
+      "text": "冻结可回放 fixture 与 oracle"
+    },
+    {
+      "done": true,
+      "text": "记录初始实验基线"
+    },
+    {
+      "done": true,
+      "text": "保存证据并交接"
+    }
+  ],
+  "steps": "1. 回放真实失败并记录判据；判据：parser 失败可重复。\n2. 固定脱敏 fixture；判据：输入、版本和来源齐全。\n3. 建立测量表；判据：成功、失败、越界三类可区分。",
+  "verification": "完成 fixture 回放、来源核对和基线报告；记录命令与退出码。",
+  "stop_conditions": "若历史内容不可合法脱敏或 oracle 不稳定，停止并更新风险登记。",
+  "handoff": "worker=codexp/gpt-5.6-sol/effort=high，会话 mdx-fallback-20260901-story01-worker-1（provider 01a05c84-63b6-7e93-98e9-22654a9a5104，ACPX exit 0，continuity match，--non-interactive-permissions fail；provider 沙箱 danger-full-access 不独立强制边界，以提示词范围+编排者对账约束）。证据：plans/i18n-codex-mdx-fallback/agent/evidence/story01-real-fixtures-2026-09-01/（2 个真实 fixture：anthropic-vertex HTML comment 损坏、taxonomy Accordion/div 错配；strict-mdx-oracle.mjs 回放两次字节级一致；historical-scan 696 页 6 失败；experiment-schema 四类记录契约；无辅助基线双 fixture final_failure exit 1；provenance 含 28273967200 R2 stale）。未决：历史 artifact metadata-only 逐 shard 映射、超时/重试阈值留给后续 Story。"
+}

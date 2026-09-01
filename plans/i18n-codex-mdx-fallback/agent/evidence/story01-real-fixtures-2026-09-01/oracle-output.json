@@ -1,0 +1,36 @@
+[
+  {
+    "file": "plans/i18n-codex-mdx-fallback/agent/evidence/story01-real-fixtures-2026-09-01/fixtures/zh-CN/plugins-reference/anthropic-vertex.md",
+    "sha256": "9eea41f0f9c50b9d4096a0d2773bb9468a535c90a0af660eeb14ad2fbee77d20",
+    "bytes": 1128,
+    "lines": 37,
+    "parser": "@mdx-js/mdx@3.1.1 compile({jsx:true})",
+    "outcome": "compile_failure",
+    "error": {
+      "source": "micromark-extension-mdx-jsx",
+      "reason": "Unexpected character `!` (U+0021) before name, expected a character that can start a name, such as a letter, `$`, or `_` (note: to create a comment in MDX, use `{/* text */}`)",
+      "line": 29,
+      "column": 2,
+      "end_line": null,
+      "end_column": null,
+      "offset": 641
+    }
+  },
+  {
+    "file": "plans/i18n-codex-mdx-fallback/agent/evidence/story01-real-fixtures-2026-09-01/fixtures/zh-CN/maturity/taxonomy.md",
+    "sha256": "1f4e4c8f604f0e957e61edf48077d304ad01a4e40fec8a5c11c07af95a2ca6b6",
+    "bytes": 446554,
+    "lines": 3790,
+    "parser": "@mdx-js/mdx@3.1.1 compile({jsx:true})",
+    "outcome": "compile_failure",
+    "error": {
+      "source": "mdast-util-mdx-jsx",
+      "reason": "Unexpected closing tag `</div>`, expected corresponding closing tag for `<Accordion>` (975:3-975:43)",
+      "line": 1075,
+      "column": 5,
+      "end_line": 1075,
+      "end_column": 11,
+      "offset": 114137
+    }
+  }
+]
