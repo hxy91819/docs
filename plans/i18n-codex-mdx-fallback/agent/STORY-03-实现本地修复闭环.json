@@ -9,9 +9,9 @@
     "STORY-02"
   ],
   "intent_version": 3,
-  "status": "blocked",
+  "status": "todo",
   "owner": "待领取",
-  "blocker": "STORY-02 未完成",
+  "blocker": "无",
   "status_updated": "2026-09-01",
   "refreshed": "待领取",
   "code_baseline": "待领取",

@@ -9,12 +9,12 @@
     "STORY-01"
   ],
   "intent_version": 3,
-  "status": "todo",
-  "owner": "待领取",
+  "status": "done",
+  "owner": "codexp",
   "blocker": "无",
   "status_updated": "2026-09-01",
-  "refreshed": "待领取",
-  "code_baseline": "待领取",
+  "refreshed": "2026-09-01",
+  "code_baseline": "26902ef702",
   "owns": [
     "FALLBACK_MODULE"
   ],
@@ -30,24 +30,24 @@
   "claim_checks": "确认 STORY-01 已完成；复核现有 action 与 parser/repair 入口；确认 checker 只拦灾难性删除；复核模型配置、辅助版本和实验开关没有生产授权。",
   "checklist": [
     {
-      "done": false,
+      "done": true,
       "text": "归纳真实诊断与 fallback 边界"
     },
     {
-      "done": false,
+      "done": true,
       "text": "定义轻量 checker 最小职责"
     },
     {
-      "done": false,
+      "done": true,
       "text": "定义会话反馈与日志事件"
     },
     {
-      "done": false,
+      "done": true,
       "text": "冻结可测试契约"
     }
   ],
   "steps": "1. 对 fixture 做诊断归类；判据：每个入口有处理或转交结论。\n2. 写 checker 契约；判据：灾难性与允许变体均有判据。\n3. 写会话协议；判据：错误可回传同一会话。",
   "verification": "契约文档、fixture 映射和评估指标已审阅；没有生产代码变更。",
   "stop_conditions": "若必须引入产品或发布边界选择，停止并请求用户决定。",
-  "handoff": "交接时记录 Story、清单计数、基线、命令/退出码、证据路径、Git 状态和下一 Story 输入。"
+  "handoff": "worker=codexp/gpt-5.6-sol/high 会话 mdx-fallback-20260901-story02-worker-1（provider 01a05c96-697c-79d3-a73e-45a4ef6f4730；首轮流含重叠片段致报告读取失败，同会话补发后 reader ok=True、continuity match）。证据：plans/i18n-codex-mdx-fallback/agent/evidence/story02-contract-2026-09-01/（contract.md/contract-checklist.md/fixture-map.json）。validator=pi/adapter默认 会话 mdx-fallback-20260901-story02-validator-1（provider 01a05c9f-0a07-7e28-9f0f-aad3292dbb39，策略 SHA-256 fddfca190e6c1609ac0096f87005dc48076d346a4e475266f24d24832f01df0c，ACPX exit 0，continuity match）：4 条验收逐条独立核实通过，无方向偏离、无第二入口、.github/.openclaw-sync 零改动。结论 PATCH_PROMPT 的处置（agent 决策）：validator 计划动作明确『契约级小缺口（§6 示例日志缺 repair_mode 与顶层 error_source/error_line/error_column 双写）不必回改冻结稿，评审通过置 done，补充要求写入 STORY-03 交接』；未回发 STORY-02 worker（其会话不得跨 Story），补充要求全文嵌入 STORY-03 worker 提示词：①日志额外输出 repair_mode+顶层 error 三元组双写；②checker 行为测试至少实现 contract-checklist 两条断言（改标点→pass；删 Accordion/空 frontmatter→fail 且 final_outcome≠success）；③HARD_TIMEOUT_MS/MAX_ATTEMPTS/checker 阈值可注入实测；④不改正式 workflow/.openclaw-sync/locale 页面。未决留档：辅助去留与生产参数 → STORY-03.1。"
 }
