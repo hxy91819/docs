@@ -1,0 +1,508 @@
+name: MDX Repair Validation
+
+# STORY-05 independent validation sub-pipeline
+# (plans/i18n-codex-mdx-fallback). It installs the production toolchain and
+# exercises the enhanced existing Codex repair relay (single entry:
+# openai/codex-action@v1) against the frozen STORY-01 fixtures. It only
+# uploads evidence: no push, no publish, no production branch changes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      real_codex:
+        description: Opt in to the real Codex repair relay on frozen fixtures (requires the agent API key).
+        type: boolean
+        default: false
+      auxiliary_mode:
+        description: Optional auxiliary arm; only none exists, so it is not selectable here.
+        type: choice
+        options:
+          - none
+        default: none
+  workflow_call:
+    inputs:
+      real_codex:
+        description: Opt in to the real Codex repair relay on frozen fixtures.
+        type: boolean
+        default: false
+      auxiliary_mode:
+        description: Optional auxiliary arm; only none is enabled (fail-closed).
+        type: string
+        default: none
+
+run-name: MDX Repair Validation (real_codex=${{ inputs.real_codex }})
+
+permissions:
+  contents: read
+
+env:
+  LOCALE: zh-CN
+  LOCALE_SLUG: zh-CN
+  SHARD_INDEX: "0"
+  SHARD_TOTAL: "1"
+  # D-10 production budget for the bounded relay (single entry:
+  # openai/codex-action@v1). mdx_repair_relay.py fails closed on invalid
+  # values and on any auxiliary arm besides none.
+  MDX_REPAIR_MAX_ATTEMPTS: "4"
+  MDX_REPAIR_HARD_TIMEOUT_MS: "600000"
+  MDX_REPAIR_AUXILIARY_MODE: "none"
+
+jobs:
+  offline-validation:
+    name: Offline validation (no secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Enforce auxiliary mode fail-closed
+        env:
+          AUXILIARY_MODE_INPUT: ${{ inputs.auxiliary_mode }}
+        run: |
+          set -euo pipefail
+          case "${AUXILIARY_MODE_INPUT:-none}" in
+            none) ;;
+            *)
+              echo "MDX_REPAIR_AUXILIARY_MODE=${AUXILIARY_MODE_INPUT} is not enabled; the validation pipeline is fail-closed." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Check out
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install production toolchain
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/mdx-repair-validation
+        run: |
+          set -euo pipefail
+          mkdir -p "${EVIDENCE_DIR}"
+          npm install -g @openai/codex@0.146.1
+          npm install --no-save --package-lock=false @mdx-js/mdx@3.1.1 tsx@4.20.3
+          {
+            echo "node=$(node --version)"
+            echo "codex=$(codex --version)"
+            echo "mdx-js=$(node -p "require('@mdx-js/mdx/package.json').version")"
+            echo "tsx=$(node -p "require('tsx/package.json').version")"
+          } | tee "${EVIDENCE_DIR}/toolchain.txt"
+
+      - name: Run i18n control-plane regressions
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/mdx-repair-validation
+        run: |
+          set -euo pipefail
+          python .github/scripts/i18n/tests/test_i18n_scripts.py 2>&1 | tee "${EVIDENCE_DIR}/pytest-i18n-scripts.log"
+
+      - name: Run mdx-fallback-lab fixture protocol tests
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/mdx-repair-validation
+        run: |
+          set -euo pipefail
+          (cd tools/mdx-fallback-lab && npm test) 2>&1 | tee "${EVIDENCE_DIR}/mdx-fallback-lab-npm-test.log"
+
+      - name: Run strict MDX oracle gate on frozen fixtures
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/mdx-repair-validation
+        run: |
+          set -euo pipefail
+          python .github/scripts/i18n/mdx_repair_validation.py oracle-gate --output-dir "${EVIDENCE_DIR}"
+
+      - name: Assert single Codex repair entry
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/mdx-repair-validation
+        run: |
+          set -euo pipefail
+          python .github/scripts/i18n/mdx_repair_validation.py single-entry \
+            --workflow .github/workflows/mdx-repair-validation.yml \
+            --output-dir "${EVIDENCE_DIR}"
+
+      - name: Upload offline validation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mdx-repair-validation-offline-${{ github.run_id }}
+          path: ${{ runner.temp }}/mdx-repair-validation
+          retention-days: 14
+
+  real-codex-relay:
+    name: Real Codex repair relay (opt-in)
+    needs: offline-validation
+    if: inputs.real_codex == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: mdx-repair-validation-real-codex
+      cancel-in-progress: false
+    steps:
+      - name: Enforce auxiliary mode fail-closed
+        env:
+          AUXILIARY_MODE_INPUT: ${{ inputs.auxiliary_mode }}
+        run: |
+          set -euo pipefail
+          case "${AUXILIARY_MODE_INPUT:-none}" in
+            none) ;;
+            *)
+              echo "MDX_REPAIR_AUXILIARY_MODE=${AUXILIARY_MODE_INPUT} is not enabled; the validation pipeline is fail-closed." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Check out
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install production toolchain
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/mdx-repair-validation
+        run: |
+          set -euo pipefail
+          mkdir -p "${EVIDENCE_DIR}"
+          npm install -g @openai/codex@0.146.1
+          npm install --no-save --package-lock=false @mdx-js/mdx@3.1.1 tsx@4.20.3
+          {
+            echo "node=$(node --version)"
+            echo "codex=$(codex --version)"
+            echo "mdx-js=$(node -p "require('@mdx-js/mdx/package.json').version")"
+            echo "tsx=$(node -p "require('tsx/package.json').version")"
+          } | tee "${EVIDENCE_DIR}/toolchain.txt"
+
+      # Environment failures (quota, auth, model availability) are classified
+      # before any relay round so they can never be disguised as repair
+      # results. This reuses the production provider gate script; the repair
+      # itself still runs only through the single codex-action entry.
+      - name: Preflight agent credentials
+        id: preflight
+        continue-on-error: true
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENCLAW_DOCS_AGENT_OPENAI_API_KEY || secrets.OPENCLAW_DOCS_I18N_OPENAI_API_KEY }}
+          OPENCLAW_DOCS_I18N_MODEL: gpt-5.6
+          EVIDENCE_DIR: ${{ runner.temp }}/mdx-repair-validation
+        run: |
+          set -euo pipefail
+          python .github/scripts/i18n/provider_preflight.py 2>&1 | tee "${EVIDENCE_DIR}/preflight.txt"
+
+      # The frozen fixture pages are staged at their production locale paths
+      # (.mdx extension so the strict checker applies MDX parsing), with
+      # minimal source stubs so the relay manifest maps them like production.
+      - name: Stage frozen fixture workspace
+        if: steps.preflight.outputs.provider_preflight == 'ok'
+        env:
+          FIXTURE_ROOT: plans/i18n-codex-mdx-fallback/agent/evidence/story01-real-fixtures-2026-09-01
+          EVIDENCE_DIR: ${{ runner.temp }}/mdx-repair-validation
+        run: |
+          set -euo pipefail
+          mkdir -p docs/zh-CN/plugins-reference docs/zh-CN/maturity docs/plugins-reference docs/maturity .openclaw-sync/mdx "${EVIDENCE_DIR}"
+          cp "${FIXTURE_ROOT}/fixtures/zh-CN/plugins-reference/anthropic-vertex.md" docs/zh-CN/plugins-reference/anthropic-vertex.mdx
+          cp "${FIXTURE_ROOT}/fixtures/zh-CN/maturity/taxonomy.md" docs/zh-CN/maturity/taxonomy.mdx
+          printf '# Anthropic Vertex\n\nFixture validation source stub.\n' > docs/plugins-reference/anthropic-vertex.mdx
+          printf '# Maturity Taxonomy\n\nFixture validation source stub.\n' > docs/maturity/taxonomy.mdx
+          printf '%s\n%s\n' \
+            "${GITHUB_WORKSPACE}/docs/plugins-reference/anthropic-vertex.mdx" \
+            "${GITHUB_WORKSPACE}/docs/maturity/taxonomy.mdx" \
+            > .openclaw-sync/docs-i18n-zh-CN-s0of1.txt
+          # The shared repair prompt tells the agent to recheck through the
+          # source-checkout checker path; stage the same checker there.
+          mkdir -p source/scripts
+          cp .openclaw-sync/check-docs-mdx.mjs source/scripts/check-docs-mdx.mjs
+          cp -R .openclaw-sync/lib source/scripts/lib
+          sha256sum docs/zh-CN/plugins-reference/anthropic-vertex.mdx docs/zh-CN/maturity/taxonomy.mdx \
+            | tee "${EVIDENCE_DIR}/staged-fixture-sha256.txt"
+          cp "${FIXTURE_ROOT}/fixture-manifest.json" "${EVIDENCE_DIR}/fixture-manifest.json"
+
+      - name: Check translated MDX
+        id: mdx_check
+        if: steps.preflight.outputs.provider_preflight == 'ok'
+        continue-on-error: true
+        run: |
+          node .openclaw-sync/check-docs-mdx.mjs "docs/${LOCALE}" \
+            --json-out ".openclaw-sync/mdx/${LOCALE}.json" \
+            --max-errors 500
+
+      # Contract startup conditions (plans/i18n-codex-mdx-fallback §1): the
+      # single repair action only starts on complete pages when the strict
+      # check failed, the staged manifest is non-empty, and compile
+      # diagnostics exist inside docs/<locale>.
+      - name: Decide MDX repair relay
+        id: mdx_relay
+        if: steps.preflight.outputs.provider_preflight == 'ok' && steps.mdx_check.outcome == 'failure'
+        env:
+          MDX_CHECK_OUTCOME: ${{ steps.mdx_check.outcome }}
+        run: |
+          python .github/scripts/i18n/mdx_repair_relay.py decide
+
+      - name: Snapshot translated MDX repair scope
+        if: steps.preflight.outputs.provider_preflight == 'ok' && steps.mdx_check.outcome == 'failure'
+        run: |
+          python .github/scripts/i18n/mdx_repair_scope.py snapshot \
+            --baseline "${RUNNER_TEMP}/${LOCALE}.repair-baseline.txt"
+
+      # Relay round 1 of at most MDX_REPAIR_MAX_ATTEMPTS (D-10 budget), using
+      # the same parameter protocol as the production repair step.
+      - name: Repair translated MDX
+        id: mdx_repair
+        if: >-
+          steps.preflight.outputs.provider_preflight == 'ok' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 1
+        continue-on-error: true
+        timeout-minutes: 12
+        uses: openai/codex-action@v1
+        env:
+          MDX_REPAIR_ROUND: "1"
+        with:
+          openai-api-key: ${{ secrets.OPENCLAW_DOCS_AGENT_OPENAI_API_KEY || secrets.OPENCLAW_DOCS_I18N_OPENAI_API_KEY }}
+          prompt-file: .openclaw-sync/docs-mdx-repair.md
+          model: gpt-5.6
+          effort: xhigh
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
+          codex-args: '["--full-auto"]'
+
+      - name: Enforce translated MDX repair scope
+        id: mdx_scope
+        if: >-
+          steps.preflight.outputs.provider_preflight == 'ok' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run'
+        continue-on-error: true
+        run: |
+          python .github/scripts/i18n/mdx_repair_scope.py enforce \
+            --baseline "${RUNNER_TEMP}/${LOCALE}.repair-baseline.txt"
+
+      - name: Recheck translated MDX
+        id: mdx_recheck
+        if: >-
+          steps.preflight.outputs.provider_preflight == 'ok' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          steps.mdx_repair.outcome == 'success' && steps.mdx_scope.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set +e
+          node .openclaw-sync/check-docs-mdx.mjs "docs/${LOCALE}" \
+            --json-out ".openclaw-sync/mdx/${LOCALE}.json" \
+            --max-errors 500
+          recheck_status=$?
+          cp ".openclaw-sync/mdx/${LOCALE}.json" ".openclaw-sync/mdx/${LOCALE}-round-1.json"
+          exit "$recheck_status"
+
+      # Relay rounds 2..MDX_REPAIR_MAX_ATTEMPTS: each round only starts when
+      # the previous round's recheck still failed, so the diagnostics file the
+      # action reads always carries that round's fed-back diagnostics. Every
+      # round stays inside the same single repair entry and its gates.
+      - name: Repair translated MDX (relay round 2)
+        id: mdx_repair_2
+        if: >-
+          steps.preflight.outputs.provider_preflight == 'ok' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 2 && steps.mdx_repair.outcome == 'success' &&
+          steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: 12
+        uses: openai/codex-action@v1
+        env:
+          MDX_REPAIR_ROUND: "2"
+        with:
+          openai-api-key: ${{ secrets.OPENCLAW_DOCS_AGENT_OPENAI_API_KEY || secrets.OPENCLAW_DOCS_I18N_OPENAI_API_KEY }}
+          prompt-file: .openclaw-sync/docs-mdx-repair.md
+          model: gpt-5.6
+          effort: xhigh
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
+          codex-args: '["--full-auto"]'
+
+      - name: Enforce translated MDX repair scope (relay round 2)
+        id: mdx_scope_2
+        if: >-
+          steps.preflight.outputs.provider_preflight == 'ok' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 2 && steps.mdx_repair.outcome == 'success' &&
+          steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure' &&
+          steps.mdx_repair_2.outcome == 'success'
+        continue-on-error: true
+        run: |
+          python .github/scripts/i18n/mdx_repair_scope.py enforce \
+            --baseline "${RUNNER_TEMP}/${LOCALE}.repair-baseline.txt"
+
+      - name: Recheck translated MDX (relay round 2)
+        id: mdx_recheck_2
+        if: >-
+          steps.preflight.outputs.provider_preflight == 'ok' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 2 && steps.mdx_repair.outcome == 'success' &&
+          steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure' &&
+          steps.mdx_repair_2.outcome == 'success' && steps.mdx_scope_2.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set +e
+          node .openclaw-sync/check-docs-mdx.mjs "docs/${LOCALE}" \
+            --json-out ".openclaw-sync/mdx/${LOCALE}.json" \
+            --max-errors 500
+          recheck_status=$?
+          cp ".openclaw-sync/mdx/${LOCALE}.json" ".openclaw-sync/mdx/${LOCALE}-round-2.json"
+          exit "$recheck_status"
+
+      - name: Repair translated MDX (relay round 3)
+        id: mdx_repair_3
+        if: >-
+          steps.preflight.outputs.provider_preflight == 'ok' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 3 && steps.mdx_repair_2.outcome == 'success' &&
+          steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: 12
+        uses: openai/codex-action@v1
+        env:
+          MDX_REPAIR_ROUND: "3"
+        with:
+          openai-api-key: ${{ secrets.OPENCLAW_DOCS_AGENT_OPENAI_API_KEY || secrets.OPENCLAW_DOCS_I18N_OPENAI_API_KEY }}
+          prompt-file: .openclaw-sync/docs-mdx-repair.md
+          model: gpt-5.6
+          effort: xhigh
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
+          codex-args: '["--full-auto"]'
+
+      - name: Enforce translated MDX repair scope (relay round 3)
+        id: mdx_scope_3
+        if: >-
+          steps.preflight.outputs.provider_preflight == 'ok' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 3 && steps.mdx_repair_2.outcome == 'success' &&
+          steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure' &&
+          steps.mdx_repair_3.outcome == 'success'
+        continue-on-error: true
+        run: |
+          python .github/scripts/i18n/mdx_repair_scope.py enforce \
+            --baseline "${RUNNER_TEMP}/${LOCALE}.repair-baseline.txt"
+
+      - name: Recheck translated MDX (relay round 3)
+        id: mdx_recheck_3
+        if: >-
+          steps.preflight.outputs.provider_preflight == 'ok' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 3 && steps.mdx_repair_2.outcome == 'success' &&
+          steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure' &&
+          steps.mdx_repair_3.outcome == 'success' && steps.mdx_scope_3.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set +e
+          node .openclaw-sync/check-docs-mdx.mjs "docs/${LOCALE}" \
+            --json-out ".openclaw-sync/mdx/${LOCALE}.json" \
+            --max-errors 500
+          recheck_status=$?
+          cp ".openclaw-sync/mdx/${LOCALE}.json" ".openclaw-sync/mdx/${LOCALE}-round-3.json"
+          exit "$recheck_status"
+
+      - name: Repair translated MDX (relay round 4)
+        id: mdx_repair_4
+        if: >-
+          steps.preflight.outputs.provider_preflight == 'ok' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 4 && steps.mdx_repair_3.outcome == 'success' &&
+          steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: 12
+        uses: openai/codex-action@v1
+        env:
+          MDX_REPAIR_ROUND: "4"
+        with:
+          openai-api-key: ${{ secrets.OPENCLAW_DOCS_AGENT_OPENAI_API_KEY || secrets.OPENCLAW_DOCS_I18N_OPENAI_API_KEY }}
+          prompt-file: .openclaw-sync/docs-mdx-repair.md
+          model: gpt-5.6
+          effort: xhigh
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
+          codex-args: '["--full-auto"]'
+
+      - name: Enforce translated MDX repair scope (relay round 4)
+        id: mdx_scope_4
+        if: >-
+          steps.preflight.outputs.provider_preflight == 'ok' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 4 && steps.mdx_repair_3.outcome == 'success' &&
+          steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure' &&
+          steps.mdx_repair_4.outcome == 'success'
+        continue-on-error: true
+        run: |
+          python .github/scripts/i18n/mdx_repair_scope.py enforce \
+            --baseline "${RUNNER_TEMP}/${LOCALE}.repair-baseline.txt"
+
+      - name: Recheck translated MDX (relay round 4)
+        id: mdx_recheck_4
+        if: >-
+          steps.preflight.outputs.provider_preflight == 'ok' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 4 && steps.mdx_repair_3.outcome == 'success' &&
+          steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure' &&
+          steps.mdx_repair_4.outcome == 'success' && steps.mdx_scope_4.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set +e
+          node .openclaw-sync/check-docs-mdx.mjs "docs/${LOCALE}" \
+            --json-out ".openclaw-sync/mdx/${LOCALE}.json" \
+            --max-errors 500
+          recheck_status=$?
+          cp ".openclaw-sync/mdx/${LOCALE}.json" ".openclaw-sync/mdx/${LOCALE}-round-4.json"
+          exit "$recheck_status"
+
+      # Classifies the relay outcome for the evidence artifact (three-state:
+      # success / agent_failure / environment_failure); mdx_repair_relay.py
+      # report keeps per-round diagnostics and per-page failures.
+      - name: Record MDX repair relay outcome
+        id: mdx_repair_report
+        if: steps.preflight.outputs.provider_preflight == 'ok' && steps.mdx_check.outcome == 'failure'
+        env:
+          # Three outcome tokens per relay round: action scope recheck.
+          MDX_REPAIR_ROUNDS_OUTCOMES: "${{ steps.mdx_repair.outcome || 'skipped' }} ${{ steps.mdx_scope.outcome || 'skipped' }} ${{ steps.mdx_recheck.outcome || 'skipped' }} ${{ steps.mdx_repair_2.outcome || 'skipped' }} ${{ steps.mdx_scope_2.outcome || 'skipped' }} ${{ steps.mdx_recheck_2.outcome || 'skipped' }} ${{ steps.mdx_repair_3.outcome || 'skipped' }} ${{ steps.mdx_scope_3.outcome || 'skipped' }} ${{ steps.mdx_recheck_3.outcome || 'skipped' }} ${{ steps.mdx_repair_4.outcome || 'skipped' }} ${{ steps.mdx_scope_4.outcome || 'skipped' }} ${{ steps.mdx_recheck_4.outcome || 'skipped' }}"
+        run: |
+          python .github/scripts/i18n/mdx_repair_relay.py report
+
+      - name: Classify validation outcome
+        id: classify
+        if: always()
+        env:
+          MDX_VALIDATION_PREFLIGHT: ${{ steps.preflight.outputs.provider_preflight || 'missing' }}
+          MDX_VALIDATION_PREFLIGHT_CLASS: ${{ steps.preflight.outputs.failure_class || '' }}
+          MDX_VALIDATION_DECISION: ${{ steps.mdx_relay.outputs.decision || 'not_run' }}
+          MDX_VALIDATION_NOT_RUN_REASON: ${{ steps.mdx_relay.outputs.reason || '' }}
+          MDX_VALIDATION_FINAL_OUTCOME: ${{ steps.mdx_repair_report.outputs.final_outcome || 'unavailable' }}
+          MDX_VALIDATION_FAILURE_KIND: ${{ steps.mdx_repair_report.outputs.failure_kind || '' }}
+          MDX_VALIDATION_ROUNDS: ${{ steps.mdx_repair_report.outputs.rounds || '0' }}
+          MDX_VALIDATION_FAILED_PATHS: ${{ steps.mdx_repair_report.outputs.failed_paths || '' }}
+          MDX_VALIDATION_CHANGED_PATHS: ${{ steps.mdx_repair_report.outputs.changed_paths || '' }}
+          EVIDENCE_DIR: ${{ runner.temp }}/mdx-repair-validation
+        run: |
+          set -euo pipefail
+          python .github/scripts/i18n/mdx_repair_validation.py classify \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --output-dir "${EVIDENCE_DIR}"
+
+      - name: Upload real-codex validation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mdx-repair-validation-real-codex-${{ github.run_id }}
+          path: ${{ runner.temp }}/mdx-repair-validation
+          retention-days: 14
+
+      - name: Fail unless classification is success
+        if: always() && steps.classify.outputs.classification != 'success'
+        env:
+          CLASSIFICATION: ${{ steps.classify.outputs.classification }}
+          REASON: ${{ steps.classify.outputs.reason }}
+        run: |
+          {
+            echo "MDX repair validation classification: ${CLASSIFICATION} (${REASON})."
+            echo "The evidence artifact keeps the per-round diagnostics; environment failures never count as repair success."
+          } >&2
+          exit 1

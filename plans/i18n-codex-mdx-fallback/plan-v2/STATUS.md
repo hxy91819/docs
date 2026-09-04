@@ -6,7 +6,7 @@
 
 ## 此刻的判断
 
-当前受阻。已验证 5 / 8 项计划结果。
+当前受阻。已验证 6 / 8 项计划结果。
 
 最近更新：2026-09-04。
 
@@ -24,7 +24,6 @@
 
 ## 需要关注
 
-- **建立独立 CI 验证子流水线**：STORY-04 未完成
 - **阶段化发布上线**：STORY-05 未完成
 - **黄金验收与线上复盘**：STORY-06 未完成
 - **实现本地修复闭环**：多错误页（1416:339 既有二次错误）的处理协议：仅修指定诊断 vs 多轮接力——STORY-03.1 用户决策点
@@ -35,6 +34,9 @@
 - **接入翻译流水线**：relay 第 2 轮与预算耗尽路径真实模式未出现，仅离线 mock 覆盖（STORY-05 真实链路观察点）
 - **接入翻译流水线**：工作流模型/CLI 与 STORY-03 实验组合等价性未测（STORY-05）
 - **接入翻译流水线**：.md 页 JSX 损伤只在打包期严格暴露（relay 覆盖既有 Check 所见）；现按页 salvage 而非整 shard 丢弃
+- **建立独立 CI 验证子流水线**：AC-01 runner 侧执行与 AC-02..05 的 workflow run 证据（run URL/job summary/artifact 清单/权限结果）在交付推送后由编排者触发 mdx-repair-validation 收集
+- **建立独立 CI 验证子流水线**：relay 第 2-4 轮与预算耗尽仅 mock 覆盖——真实 runner 出现该路径时产生首份现场证据
+- **建立独立 CI 验证子流水线**：npm install 全树安装+tsx pin 与生产同模式，本地未全量验证安装命令
 
 ## 已经得到的结果
 
@@ -43,3 +45,4 @@
 - **实现本地修复闭环**：STORY-03 完成。模块 tools/mdx-fallback-lab/ 六阶段闭环（npm test 7/7）；真实 opt-in 双 fixture：plugin-html-comment enhanced=success（2 轮/210s/exit 0，diff 恰 2 处 HTML 注释→MDX 表达式，strict oracle 独立复核 compile_success），taxonomy enhanced=final_failure（诚实分类：fixture 第 1416 行存在 STORY-01 诊断之外的第二处既有错误，agent 按仅修指定诊断协议未扩大范围）。参数演化 120s→300s 实测授权留档；CODEX_HOME=/root/.codex（personal 账号不支持 gpt-5.6-sol 且配额受限至 2026-10-02，默认账号可用）。validator=delegate/economy 结论 CONTINUE。
 - **汇总可行性并等待用户决策**：用户决策 D-09 已落盘并经实测+validator 复核：方案 A 仅增强现有 Codex action（无辅助）；多错误页多轮接力协议（每轮修复反馈诊断直至编译通过或预算上限）；单轮 300s 实测、MAX_ATTEMPTS 注入默认 4。接力实测：双 fixture enhanced=success（plugin 1 轮 70,743ms；taxonomy 1 轮 166,576ms 修复 1061/1075+1417 两处既有错误，内容保留 3789/3790 行，strict oracle 独立复核 exit 0）。validator=delegate 结论 CONTINUE。决策包（含 A/B/C+DP-1/DP-2 分析与 PATCH 修正）存 evidence/story03.1-decision-package-2026-09-04/。
 - **接入翻译流水线**：STORY-04 完成。单一 codex-action@v1 入口增强为 ≤4 轮有界接力（Repair→Enforce scope→Recheck，轮 N+1 需 MAX_ATTEMPTS>=N+上轮 scope success+上轮 recheck failure 三重门控）；新增 .github/scripts/i18n/mdx_repair_relay.py decide/report（契约 §1 启动条件 not_run 四类、预算与辅助开关 fail-closed、内容快照、无阈值内容丢失守卫、repair_mode/rounds/顶层 error 三元组、changed paths sha256）；package_artifact 逐页 partial-success（不可救页排除+标记，成功页正常打包；基础设施错误整 shard fail-closed）；apply_artifacts finalizer 解释 failed_paths；docs-mdx-repair.md 更新接力措辞。validator=delegate 结论 CONTINUE。生产预算按 D-10 提高为单轮 600s（步级 timeout 12min），取代 D-09 的 300s 生产默认；300s 保留为实验实测基线。
+- **建立独立 CI 验证子流水线**：STORY-05 完成。新增 .github/workflows/mdx-repair-validation.yml（workflow_dispatch+workflow_call；real_codex 默认 false；auxiliary_mode 仅 none，非 none 运行时 fail-closed）+ .github/scripts/i18n/mdx_repair_validation.py（oracle-gate/single-entry/classify 三态：success/agent_failure/environment_failure，preflight 复用生产 provider_preflight 分类）+13 个结构/行为测试（pytest 132 passed）。offline job 零 secret（工具链 0.146.1+Node22+mdx3.1.1、全量测试、lab npm test、oracle gate、单入口断言）；real-codex-relay job 逐字节复刻生产接力（4×codex-action 12min、D-10 预算 600000×4、逐轮诊断落盘、artifact 先传后置红）。validator=delegate 结论 CONTINUE。

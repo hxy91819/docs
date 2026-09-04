@@ -42,6 +42,7 @@ clear_pending_locale_outputs = load_module("clear_pending_locale_outputs")
 package_artifact = load_module("package_artifact")
 mdx_repair_scope = load_module("mdx_repair_scope")
 mdx_repair_relay = load_module("mdx_repair_relay")
+mdx_repair_validation = load_module("mdx_repair_validation")
 apply_artifacts = load_module("apply_artifacts")
 merge_artifact_roots = load_module("merge_artifact_roots")
 read_source_metadata = load_module("read_source_metadata")
@@ -91,7 +92,11 @@ def init_repo(repo: Path) -> None:
 
 class I18NScriptTests(unittest.TestCase):
     def test_translate_workflows_call_existing_scripts_without_inline_python_or_node_heredocs(self) -> None:
-        workflows = sorted((REPO_ROOT / ".github/workflows").glob("translate-*.yml"))
+        # The MDX repair validation sub-pipeline (STORY-05) joins the same
+        # audit: no inline interpreter heredocs, and every i18n control-plane
+        # script it uses is called through the recognized patterns.
+        validation_workflow = REPO_ROOT / ".github/workflows/mdx-repair-validation.yml"
+        workflows = sorted(set((REPO_ROOT / ".github/workflows").glob("translate-*.yml")) | {validation_workflow})
         self.assertTrue(workflows)
 
         called_scripts: set[Path] = set()
@@ -3734,6 +3739,353 @@ class I18NScriptTests(unittest.TestCase):
             payload_path.parent.mkdir(parents=True, exist_ok=True)
             payload_path.write_text(text, encoding="utf-8")
         return artifact
+
+
+class MdxRepairValidationWorkflowTests(unittest.TestCase):
+    """STORY-05: independent CI validation sub-pipeline structure contract."""
+
+    def _workflow_text(self) -> str:
+        return (REPO_ROOT / ".github/workflows/mdx-repair-validation.yml").read_text(encoding="utf-8")
+
+    def _dispatch_block(self, text: str) -> str:
+        match = re.search(r"(?ms)^  workflow_dispatch:\n.*?(?=^  workflow_call:)", text)
+        self.assertIsNotNone(match)
+        assert match is not None
+        return match.group(0)
+
+    def _workflow_call_block(self, text: str) -> str:
+        match = re.search(r"(?ms)^  workflow_call:\n.*?(?=^run-name:)", text)
+        self.assertIsNotNone(match)
+        assert match is not None
+        return match.group(0)
+
+    def _offline_job_block(self, text: str) -> str:
+        match = re.search(r"(?ms)^  offline-validation:\n.*?(?=^  [A-Za-z0-9_-]+:\n)", text)
+        self.assertIsNotNone(match)
+        assert match is not None
+        return match.group(0)
+
+    def _real_job_block(self, text: str) -> str:
+        match = re.search(r"(?ms)^  real-codex-relay:\n.*", text)
+        self.assertIsNotNone(match)
+        assert match is not None
+        return match.group(0)
+
+    def test_validation_workflow_supports_dispatch_and_reuse_with_real_codex_default_off(self) -> None:
+        text = self._workflow_text()
+        self.assertIn("workflow_dispatch:", text)
+        self.assertIn("workflow_call:", text)
+        dispatch = self._dispatch_block(text)
+        reusable = self._workflow_call_block(text)
+        for block in (dispatch, reusable):
+            self.assertIn("real_codex:", block)
+            self.assertIn("default: false", block)
+        # auxiliary_mode is fixed to none: dispatch offers a single-choice
+        # list, and reusable callers get a fail-closed guard at runtime.
+        self.assertIn("type: choice", dispatch)
+        options = re.search(r"(?ms)auxiliary_mode:\n.*?options:\n((?:\s+- [^\n]+\n)+)", dispatch)
+        self.assertIsNotNone(options)
+        assert options is not None
+        option_values = [line.strip("- \n") for line in options.group(1).splitlines() if line.strip()]
+        self.assertEqual(["none"], option_values)
+        self.assertIn("auxiliary_mode:", reusable)
+        self.assertIn("default: none", reusable)
+
+    def test_validation_workflow_keeps_single_entry_bounded_relay(self) -> None:
+        text = self._workflow_text()
+
+        # D-10 budgets mirror the production relay; auxiliary stays none.
+        self.assertIn('MDX_REPAIR_MAX_ATTEMPTS: "4"', text)
+        self.assertIn('MDX_REPAIR_HARD_TIMEOUT_MS: "600000"', text)
+        self.assertIn('MDX_REPAIR_AUXILIARY_MODE: "none"', text)
+
+        # Exactly one Agent entry, unrolled into at most MAX_ATTEMPTS rounds
+        # with the identical production parameter protocol; no second Codex
+        # executor and no direct model API call exists anywhere.
+        self.assertEqual(4, text.count("uses: openai/codex-action@v1"))
+        self.assertEqual(4, text.count("timeout-minutes: 12\n"))
+        self.assertEqual(4, text.count("prompt-file: .openclaw-sync/docs-mdx-repair.md"))
+        self.assertEqual(4, text.count("model: gpt-5.6"))
+        self.assertEqual(4, text.count("effort: xhigh"))
+        self.assertEqual(4, text.count('codex-args: \'["--full-auto"]\''))
+        self.assertNotIn("codex exec", text)
+        self.assertNotIn("api.openai.com", text)
+
+        # Contract stage order: preflight -> staging -> strict check -> relay
+        # decision -> scope snapshot -> per-round (repair -> enforce scope ->
+        # recheck) -> report -> classification.
+        order = [
+            "Preflight agent credentials",
+            "Stage frozen fixture workspace",
+            "Check translated MDX",
+            "Decide MDX repair relay",
+            "Snapshot translated MDX repair scope",
+            "Repair translated MDX\n",
+            "Enforce translated MDX repair scope\n",
+            "Recheck translated MDX\n",
+            "Repair translated MDX (relay round 2)",
+            "Enforce translated MDX repair scope (relay round 2)",
+            "Recheck translated MDX (relay round 2)",
+            "Repair translated MDX (relay round 3)",
+            "Enforce translated MDX repair scope (relay round 3)",
+            "Recheck translated MDX (relay round 3)",
+            "Repair translated MDX (relay round 4)",
+            "Enforce translated MDX repair scope (relay round 4)",
+            "Recheck translated MDX (relay round 4)",
+            "Record MDX repair relay outcome",
+            "Classify validation outcome",
+        ]
+        positions = [text.index(name) for name in order]
+        self.assertEqual(sorted(positions), positions)
+
+        # Relay stop conditions: round N+1 only runs when round N's recheck
+        # still failed, so retries are bounded and diagnostics stay current.
+        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 1", text)
+        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 2", text)
+        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 3", text)
+        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 4", text)
+        self.assertIn("steps.mdx_repair.outcome == 'success' &&\n          steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure'", text)
+        self.assertIn("steps.mdx_repair_2.outcome == 'success' &&\n          steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure'", text)
+        self.assertIn("steps.mdx_repair_3.outcome == 'success' &&\n          steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure'", text)
+
+        # Every relay round keeps the scope and strict recheck gates; the
+        # scope baseline is snapshotted once before the first repair round.
+        self.assertEqual(4, text.count("mdx_repair_scope.py enforce"))
+        self.assertEqual(1, text.count("mdx_repair_scope.py snapshot"))
+        self.assertEqual(5, text.count("node .openclaw-sync/check-docs-mdx.mjs"))
+        self.assertIn('python .github/scripts/i18n/mdx_repair_relay.py decide', text)
+        self.assertIn('python .github/scripts/i18n/mdx_repair_relay.py report', text)
+
+        # Twelve outcome tokens: three per relay round.
+        self.assertEqual(12, text.count("|| 'skipped' }}"))
+
+    def test_validation_workflow_is_read_only_and_publish_free(self) -> None:
+        text = self._workflow_text()
+        self.assertRegex(text, r"(?m)^permissions:\n  contents: read\n")
+        self.assertNotIn("contents: write", text)
+        self.assertNotIn("actions: write", text)
+        self.assertNotIn("git push", text)
+        self.assertNotIn("git commit", text)
+        self.assertNotIn("commit_locale_artifact", text)
+        self.assertNotIn("dispatch_r2_pages", text)
+        self.assertNotIn("apply_artifacts", text)
+        self.assertNotIn("package_artifact", text)
+        self.assertNotIn("persist-credentials: true", text)
+        self.assertEqual(2, text.count("persist-credentials: false"))
+
+    def test_validation_workflow_offline_job_needs_no_secrets_and_real_job_is_opt_in(self) -> None:
+        text = self._workflow_text()
+        offline = self._offline_job_block(text)
+        self.assertNotIn("secrets.", offline)
+        real = self._real_job_block(text)
+        self.assertIn("needs: offline-validation", real)
+        self.assertIn("if: inputs.real_codex == true", real)
+        # Environment failures are preflighted before any repair round so the
+        # three-state classification can never disguise them as results.
+        self.assertIn("Preflight agent credentials", real)
+        # Staging, strict check, relay decision, and the scope snapshot all
+        # stay gated on the preflight outcome.
+        self.assertEqual(
+            3,
+            real.count("steps.preflight.outputs.provider_preflight == 'ok' && steps.mdx_check.outcome == 'failure'"),
+        )
+        round_blocks = re.findall(r"(?ms)^      - name: Repair translated MDX.*?(?=^      - name:)", real)
+        self.assertEqual(4, len(round_blocks))
+        for block in round_blocks:
+            self.assertIn("uses: openai/codex-action@v1", block)
+            self.assertIn("steps.preflight.outputs.provider_preflight == 'ok'", block)
+            self.assertIn("steps.mdx_check.outcome == 'failure'", block)
+            self.assertIn("steps.mdx_relay.outputs.decision == 'run'", block)
+            self.assertIn("timeout-minutes: 12", block)
+            self.assertIn("continue-on-error: true", block)
+        self.assertIn("provider_preflight.py", real)
+
+    def test_validation_workflow_installs_production_toolchain_and_offline_gates(self) -> None:
+        text = self._workflow_text()
+        self.assertIn("npm install -g @openai/codex@0.146.1", text)
+        self.assertIn("node-version: 22", text)
+        self.assertIn("@mdx-js/mdx@3.1.1", text)
+        self.assertIn("python .github/scripts/i18n/tests/test_i18n_scripts.py", text)
+        self.assertIn("(cd tools/mdx-fallback-lab && npm test)", text)
+        self.assertIn("mdx_repair_validation.py oracle-gate", text)
+        self.assertIn("mdx_repair_validation.py single-entry", text)
+        self.assertIn("fixture-manifest.json", text)
+
+    def test_validation_workflow_enforces_auxiliary_fail_closed(self) -> None:
+        text = self._workflow_text()
+        self.assertEqual(2, text.count("Enforce auxiliary mode fail-closed"))
+        self.assertEqual(2, text.count("AUXILIARY_MODE_INPUT: ${{ inputs.auxiliary_mode }}"))
+        self.assertIn("is not enabled; the validation pipeline is fail-closed", text)
+
+    def test_validation_workflow_uploads_evidence_and_gates_on_classification(self) -> None:
+        text = self._workflow_text()
+        self.assertIn("name: mdx-repair-validation-offline-${{ github.run_id }}", text)
+        self.assertIn("name: mdx-repair-validation-real-codex-${{ github.run_id }}", text)
+        self.assertEqual(2, text.count("retention-days: 14"))
+        self.assertEqual(3, text.count("if: always()\n"))
+        self.assertIn("if: always() && steps.classify.outputs.classification != 'success'", text)
+        self.assertIn("mdx_repair_validation.py classify", text)
+        self.assertIn("steps.classify.outputs.classification != 'success'", text)
+
+    def test_validation_workflow_single_entry_audit_passes_on_current_workflow(self) -> None:
+        report = mdx_repair_validation.single_entry_report(
+            REPO_ROOT / ".github/workflows/mdx-repair-validation.yml"
+        )
+        self.assertTrue(report["passed"])
+        self.assertEqual(4, report["rounds_budget"])
+        self.assertEqual(4, report["action_count"])
+        self.assertEqual(4, report["prompt_count"])
+        self.assertEqual([], report["second_executor_tokens"])
+
+    def test_validation_workflow_single_entry_audit_rejects_second_executor(self) -> None:
+        workflow = REPO_ROOT / ".github/workflows/mdx-repair-validation.yml"
+        with tempfile.TemporaryDirectory() as tmp:
+            mutated = Path(tmp) / "mutated.yml"
+            mutated.write_text(
+                workflow.read_text(encoding="utf-8") + "      - run: codex exec --dangerously-bypass\n",
+                encoding="utf-8",
+            )
+            report = mdx_repair_validation.single_entry_report(mutated)
+            self.assertFalse(report["passed"])
+            self.assertIn("codex exec", report["second_executor_tokens"])
+
+            extra_round = Path(tmp) / "extra-round.yml"
+            extra_round.write_text(
+                workflow.read_text(encoding="utf-8").replace(
+                    'MDX_REPAIR_MAX_ATTEMPTS: "4"', 'MDX_REPAIR_MAX_ATTEMPTS: "5"'
+                ),
+                encoding="utf-8",
+            )
+            report = mdx_repair_validation.single_entry_report(extra_round)
+            self.assertFalse(report["passed"])
+            self.assertEqual(5, report["rounds_budget"])
+            self.assertEqual(4, report["action_count"])
+
+    def test_oracle_gate_expectations_come_from_frozen_fixture_manifest(self) -> None:
+        expectations = mdx_repair_validation.load_fixture_expectations()
+        self.assertEqual(2, len(expectations))
+        by_id = {str(entry["fixture_id"]): entry for entry in expectations}
+        html_comment = by_id["real-27629404260-zhcn-plugin-html-comment"]
+        taxonomy = by_id["real-27629404260-zhcn-taxonomy-stray-close"]
+        self.assertEqual("micromark-extension-mdx-jsx", html_comment["expected"]["source"])
+        self.assertEqual(29, html_comment["expected"]["line"])
+        self.assertEqual("mdast-util-mdx-jsx", taxonomy["expected"]["source"])
+        self.assertEqual(1075, taxonomy["expected"]["line"])
+        self.assertTrue(str(html_comment["file"]).startswith(str(REPO_ROOT)))
+
+    def test_oracle_expectation_match_requires_manifest_diagnostics_and_hash(self) -> None:
+        expectation = {
+            "expected": {"source": "mdast-util-mdx-jsx", "line": 1075, "column": 5, "offset": 114137},
+            "content_sha256": "hash-a",
+        }
+        failing = {
+            "outcome": "compile_failure",
+            "sha256": "hash-a",
+            "error": {"source": "mdast-util-mdx-jsx", "line": 1075, "column": 5, "offset": 114137},
+        }
+        self.assertTrue(mdx_repair_validation.oracle_expectation_matches(failing, expectation))
+        drifting_hash = {**failing, "sha256": "hash-b"}
+        self.assertFalse(mdx_repair_validation.oracle_expectation_matches(drifting_hash, expectation))
+        passing = {**failing, "outcome": "compile_success"}
+        self.assertFalse(mdx_repair_validation.oracle_expectation_matches(passing, expectation))
+        wrong_span = {
+            **failing,
+            "error": {"source": "mdast-util-mdx-jsx", "line": 900, "column": 5, "offset": 1},
+        }
+        self.assertFalse(mdx_repair_validation.oracle_expectation_matches(wrong_span, expectation))
+
+    def test_classify_verdict_covers_three_states(self) -> None:
+        base = {
+            "MDX_REPAIR_AUXILIARY_MODE": "none",
+            "MDX_VALIDATION_PREFLIGHT": "ok",
+            "MDX_VALIDATION_DECISION": "run",
+            "MDX_VALIDATION_FINAL_OUTCOME": "success",
+        }
+
+        def verdict_with(**overrides: str) -> tuple[str, str]:
+            with env({**base, **overrides}):  # type: ignore[arg-type]
+                return mdx_repair_validation.classify_verdict()
+
+        self.assertEqual(("success", "frozen_fixtures_pass_strict_recheck"), verdict_with())
+        self.assertEqual(("agent_failure", "relay_final_failure"), verdict_with(MDX_VALIDATION_FINAL_OUTCOME="final_failure"))
+        self.assertEqual(("agent_failure", "relay_partial_success"), verdict_with(MDX_VALIDATION_FINAL_OUTCOME="partial_success"))
+
+        classification, reason = verdict_with(
+            MDX_VALIDATION_PREFLIGHT="failed", MDX_VALIDATION_PREFLIGHT_CLASS="quota_exhausted"
+        )
+        self.assertEqual("environment_failure", classification)
+        self.assertEqual("preflight_failed_quota_exhausted", reason)
+        self.assertEqual(("environment_failure", "preflight_missing"), verdict_with(MDX_VALIDATION_PREFLIGHT="missing"))
+
+        classification, reason = verdict_with(
+            MDX_VALIDATION_DECISION="not_run",
+            MDX_VALIDATION_NOT_RUN_REASON="no_mdx_compile_diagnostics",
+            MDX_VALIDATION_FINAL_OUTCOME="unavailable",
+        )
+        self.assertEqual("environment_failure", classification)
+        self.assertEqual("relay_not_started_no_mdx_compile_diagnostics", reason)
+
+        classification, reason = verdict_with(MDX_VALIDATION_FINAL_OUTCOME="unavailable")
+        self.assertEqual("environment_failure", classification)
+        self.assertEqual("relay_outcome_unavailable", reason)
+
+        classification, reason = verdict_with(MDX_REPAIR_AUXILIARY_MODE="prettier")
+        self.assertEqual("environment_failure", classification)
+        self.assertEqual("auxiliary_mode_prettier_not_enabled", reason)
+
+    def test_classify_command_writes_report_evidence_and_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            mdx_dir = repo / ".openclaw-sync/mdx"
+            mdx_dir.mkdir(parents=True)
+            (mdx_dir / "zh-CN-round-1.json").write_text(
+                json.dumps(
+                    {
+                        "errors": [
+                            {
+                                "type": "mdx",
+                                "file": "docs/zh-CN/maturity/taxonomy.mdx",
+                                "line": 1063,
+                                "column": 5,
+                                "message": "Unexpected closing tag `</div>`",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (mdx_dir / "zh-CN-repair-report.json").write_text(
+                json.dumps({"final_outcome": "final_failure", "rounds_history": [{"round": 1, "error_count": 1}]}),
+                encoding="utf-8",
+            )
+            output = repo / "github-output.txt"
+            evidence = repo / "evidence"
+            with chdir(repo), env(
+                {
+                    "GITHUB_WORKSPACE": str(repo),
+                    "GITHUB_OUTPUT": str(output),
+                    "MDX_REPAIR_AUXILIARY_MODE": "none",
+                    "MDX_VALIDATION_PREFLIGHT": "ok",
+                    "MDX_VALIDATION_DECISION": "run",
+                    "MDX_VALIDATION_FINAL_OUTCOME": "final_failure",
+                    "MDX_VALIDATION_FAILURE_KIND": "compile_failed",
+                    "MDX_VALIDATION_ROUNDS": "1",
+                    "MDX_VALIDATION_FAILED_PATHS": "docs/zh-CN/maturity/taxonomy.mdx",
+                }
+            ):
+                payload = mdx_repair_validation.classify_command(repo, "zh-CN", evidence)
+
+            self.assertEqual("agent_failure", payload["classification"])
+            report = json.loads((evidence / "classification.json").read_text(encoding="utf-8"))
+            self.assertEqual("agent_failure", report["classification"])
+            self.assertEqual("relay_final_failure", report["reason"])
+            self.assertEqual(["docs/zh-CN/maturity/taxonomy.mdx"], report["relay"]["failed_paths"])
+            self.assertEqual(1, report["relay"]["round_diagnostics"][0]["error_count"])
+            self.assertEqual("final_failure", report["relay"]["report"]["final_outcome"])
+            self.assertTrue((evidence / "relay/zh-CN-round-1.json").exists())
+            self.assertTrue((evidence / "relay/zh-CN-repair-report.json").exists())
+            self.assertIn("classification=agent_failure", output.read_text(encoding="utf-8"))
+            self.assertIn("reason=relay_final_failure", output.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
