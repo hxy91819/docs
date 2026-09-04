@@ -1,0 +1,92 @@
+{
+  "kind": "large-task-story",
+  "schema_version": 2,
+  "id": "STORY-03",
+  "plan": "EPIC-I18N-MDX-CODEX-FALLBACK",
+  "title": "实现本地修复闭环",
+  "intent_version": 3,
+  "status": "done",
+  "blocked_by": [
+    "STORY-02"
+  ],
+  "covers": [
+    "GC-02",
+    "GC-03",
+    "GC-04"
+  ],
+  "outcome": "在不启动整条 GitHub 流水线的情况下，开发者可以用一个本地脚本驱动“完整页面诊断—增强现有 Codex action—轻量检查—反馈重试—最终验收”的完整实验循环，并用证据判断 Prettier 或 PR #153 是否值得作为可选辅助。这个 Story 只产出实验原型和可行性数据，不授权生产接入。",
+  "acceptance": [
+    {
+      "id": "AC-01",
+      "criterion": "离线测试覆盖成功修复、检查器拦截和 Codex 反馈循环的可观察行为。",
+      "passed": true
+    },
+    {
+      "id": "AC-02",
+      "criterion": "离线测试必须运行无辅助与增强现有 Codex action；Prettier/PR #153 若启用则分别记录阶段顺序、格式化失败和冲突结果，不要求组合覆盖。",
+      "passed": true
+    },
+    {
+      "id": "AC-03",
+      "criterion": "设置实验环境后，本地命令能真实启动 Codex 并修复至少一个真实 fixture。",
+      "passed": true
+    },
+    {
+      "id": "AC-04",
+      "criterion": "每次尝试都有结构化日志和可回放的输入/输出；修改范围可被后续 CI 检查。",
+      "passed": true
+    },
+    {
+      "id": "AC-05",
+      "criterion": "模块失败时返回明确状态，不吞掉原始 parser 或 checker 诊断；没有净收益的辅助可以被完整关闭。",
+      "passed": true
+    },
+    {
+      "id": "AC-06",
+      "criterion": "实验结束后只产出可行性报告所需证据；正式接入前必须等待用户决策。",
+      "passed": true
+    }
+  ],
+  "context": {
+    "test_seams": [
+      "tools/mdx-fallback-lab：cd tools/mdx-fallback-lab && npm test（六阶段顺序、checker 行为断言、辅助臂 fail-closed、no_assistance 臂断言）",
+      "plans/i18n-codex-mdx-fallback/agent/evidence/story01-real-fixtures-2026-09-01/strict-mdx-oracle.mjs（@mdx-js/mdx@3.1.1 严格编译 oracle）"
+    ],
+    "code_anchors": [
+      "tools/mdx-fallback-lab/index.mjs：本地驱动入口（注入参数→六阶段→experiment.ndjson）",
+      "tools/mdx-fallback-lab/action.mjs：runRealCodex 唯一 Agent 调用点（spawn stdin=ignore；MDX_LAB_MODEL/MDX_LAB_EFFORT/MDX_LAB_CODEX_HOME 注入）",
+      "tools/mdx-fallback-lab/checker.mjs：灾难性删除最小职责（CHECKER_CONFIG 注入、缺省 fail-closed）"
+    ],
+    "authoritative_inputs": [
+      "plans/i18n-codex-mdx-fallback/agent/evidence/story02-contract-2026-09-01/contract.md（冻结契约）与 fixture-map.json",
+      "plans/i18n-codex-mdx-fallback/agent/evidence/story01-real-fixtures-2026-09-01/（真实 fixture、oracle、experiment-schema）",
+      "plans/i18n-codex-mdx-fallback/agent/evidence/story03-local-loop-2026-09-01/（已交付证据；README 与 real-opt-in/commands.json 记录复跑命令与参数）",
+      "plans/i18n-codex-mdx-fallback/agent/实验契约.json"
+    ],
+    "write_scope": [
+      "实现独立实验模块和本地驱动；接收 fixture、当前文件和 parser/checker 诊断；主实验只运行无辅助与增强现有 Codex action。Prettier 或 PR #153 仅在显式启用、成本可接受时各自单独运行，无法测量或没有代表样本就记录跳过原因，不做默认组合矩阵。启动现有 Codex repair action（实验组合 `Codex + Luna + max`）；每次修改后运行检查器，把失败信息回送同一会话。Prettier 只处理临时副本，输出不通过严格 parser 或内容检查就丢弃；PR #153 只作为可回退对照。超时、重试和模型参数可注入，默认值由实验记录而来。保存每轮修改、诊断、检查结果和最终文件。提供离线 mock 测试，以及显式启用、可真实启动本地 Codex 的集成测试。不得修改正式工作流或生成 locale 页面。"
+    ],
+    "stop_conditions": [
+      "若 Agent 修改范围无法被 checker 或 parser 验收、辅助不能在临时副本安全丢弃、或实验不能区分增强 action 与辅助贡献，停止并回到契约修订；不得绕过 STORY-03.1 进入生产。"
+    ]
+  },
+  "owner": "native-worker-codex-1",
+  "blocker": null,
+  "updated": "2026-09-04",
+  "handoff": {
+    "summary": "STORY-03 完成。模块 tools/mdx-fallback-lab/ 六阶段闭环（npm test 7/7）；真实 opt-in 双 fixture：plugin-html-comment enhanced=success（2 轮/210s/exit 0，diff 恰 2 处 HTML 注释→MDX 表达式，strict oracle 独立复核 compile_success），taxonomy enhanced=final_failure（诚实分类：fixture 第 1416 行存在 STORY-01 诊断之外的第二处既有错误，agent 按仅修指定诊断协议未扩大范围）。参数演化 120s→300s 实测授权留档；CODEX_HOME=/root/.codex（personal 账号不支持 gpt-5.6-sol 且配额受限至 2026-10-02，默认账号可用）。validator=delegate/economy 结论 CONTINUE。",
+    "verification": [
+      "cd tools/mdx-fallback-lab && npm test → 7/7",
+      "strict-mdx-oracle.mjs 对修复后快照 → exit 0 compile_success（validator 独立运行）",
+      "real-opt-in/experiment.ndjson 4 条记录含 repair_mode+顶层 error 三元组双写",
+      "parameter-evolution.json 三轮归档 + environment-diagnostic ×3",
+      "git diff 零越界（.github/.openclaw-sync/docs 除并行改动外无变化）"
+    ],
+    "remaining": [],
+    "risks": [
+      "多错误页（1416:339 既有二次错误）的处理协议：仅修指定诊断 vs 多轮接力——STORY-03.1 用户决策点",
+      "300s 实测超时是否作为生产预算提案——STORY-03.1 用户决策点"
+    ],
+    "next": "STORY-03.1 汇总可行性：1 success / 1 final_failure@1416:339；生产接入仍需用户决策门禁，不得绕过。"
+  }
+}

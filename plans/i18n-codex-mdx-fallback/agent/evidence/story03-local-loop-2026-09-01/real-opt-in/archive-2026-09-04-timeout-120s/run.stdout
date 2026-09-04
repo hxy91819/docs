@@ -1,0 +1,33 @@
+{
+  "evidence": "/data/code/openclaw/docs/plans/i18n-codex-mdx-fallback/agent/evidence/story03-local-loop-2026-09-01/real-opt-in",
+  "records": [
+    {
+      "fixture_id": "real-27629404260-zhcn-plugin-html-comment",
+      "arm": "no_assistance",
+      "final_outcome": "final_failure",
+      "parser_outcome": "compile_failure",
+      "checker_result": "not_run"
+    },
+    {
+      "fixture_id": "real-27629404260-zhcn-plugin-html-comment",
+      "arm": "enhanced_existing_codex_action",
+      "final_outcome": "final_failure",
+      "parser_outcome": "compile_failure",
+      "checker_result": "not_run"
+    },
+    {
+      "fixture_id": "real-27629404260-zhcn-taxonomy-stray-close",
+      "arm": "no_assistance",
+      "final_outcome": "final_failure",
+      "parser_outcome": "compile_failure",
+      "checker_result": "not_run"
+    },
+    {
+      "fixture_id": "real-27629404260-zhcn-taxonomy-stray-close",
+      "arm": "enhanced_existing_codex_action",
+      "final_outcome": "final_failure",
+      "parser_outcome": "compile_failure",
+      "checker_result": "not_run"
+    }
+  ]
+}

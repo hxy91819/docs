@@ -1,0 +1,30 @@
+{
+  "command": "node tools/mdx-fallback-lab/index.mjs",
+  "environment": {
+    "HARD_TIMEOUT_MS": 120000,
+    "MAX_ATTEMPTS": 2,
+    "AUXILIARY_MODE": "none",
+    "MDX_LAB_REAL_CODEX": "1",
+    "MDX_LAB_MODEL": "gpt-5.6-sol",
+    "MDX_LAB_EFFORT": "high",
+    "MDX_LAB_CODEX_HOME": "/root/.codex"
+  },
+  "required_order": [
+    "完整页面组装",
+    "严格 @mdx-js/mdx parser/oracle 产生完整诊断",
+    "可选辅助（none、固定版 Prettier 或 PR #153；仅在显式实验臂启用时运行）",
+    "增强后的现有 Codex repair action（唯一 Agent 执行器）",
+    "轻量 checker、scope 和 protected-attribute 检查；拒绝时把具体错误回传同一会话并消耗有界尝试",
+    "外部严格 MDX recheck 与 artifact 门禁；仍失败则显式 per-file/per-shard failure"
+  ],
+  "stage_order": [
+    "parser",
+    "auxiliary",
+    "codex",
+    "checker",
+    "scope",
+    "protected_attribute",
+    "recheck",
+    "artifact"
+  ]
+}

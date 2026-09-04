@@ -1,0 +1,7 @@
+{
+  "command": "mkdir -p .local/story03-scratch && touch .local/story03-scratch/.wtest && rm .local/story03-scratch/.wtest; touch /root/.codex-profiles/personal/.wtest",
+  "scratch_write": {"exit_code": 0, "result": "pass"},
+  "profile_write": {"exit_code": 1, "result": "fail", "stderr": "touch: cannot touch '/root/.codex-profiles/personal/.wtest': Read-only file system"},
+  "credential_copy": {"auth_json": "present", "config_toml": "present", "exit_code": 0, "destination": ".local/story03-scratch/codex-home"},
+  "interpretation": "workspace scratch and isolated CODEX_HOME are writable while the original profile path is read-only; no permissions or mounts were changed"
+}

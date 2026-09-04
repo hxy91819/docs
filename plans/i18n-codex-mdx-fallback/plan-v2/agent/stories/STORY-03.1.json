@@ -1,0 +1,77 @@
+{
+  "kind": "large-task-story",
+  "schema_version": 2,
+  "id": "STORY-03.1",
+  "plan": "EPIC-I18N-MDX-CODEX-FALLBACK",
+  "title": "汇总可行性并等待用户决策",
+  "intent_version": 2,
+  "status": "blocked",
+  "blocked_by": [
+    "STORY-03"
+  ],
+  "covers": [
+    "GC-01",
+    "GC-02",
+    "GC-03",
+    "GC-04"
+  ],
+  "outcome": "在正式修改翻译流水线之前，用户能看到一份基于真实 fixture 和实验数据的可行性结论，并明确选择增强现有 Codex action 的生产边界，以及是否保留 Prettier 或 PR #153 这类可选辅助。实验结果不会自动变成生产授权。",
+  "acceptance": [
+    {
+      "id": "AC-01",
+      "criterion": "决策包必须比较无辅助与增强现有 Codex action，并对已运行的 Prettier/PR #153 探测标出样本分母、未知项和不可比项；未运行的辅助要说明原因，不把它们变成主路径前置条件。",
+      "passed": false
+    },
+    {
+      "id": "AC-02",
+      "criterion": "PR #153 的状态、head、与目标 `main` 的差异、测试结果和已知失败，以及 Prettier 的固定版本和探测结果均有可追溯记录；未复验的候选不能直接作为生产依赖。",
+      "passed": false
+    },
+    {
+      "id": "AC-03",
+      "criterion": "报告包含明确的纳入、修订后纳入和放弃方案，以及每个方案的风险、回退方式和后续工作量。",
+      "passed": false
+    },
+    {
+      "id": "AC-04",
+      "criterion": "用户的选择、附加条件或要求补实验已写入计划；在此之前不得开始 STORY-04 的正式代码接入。",
+      "passed": false
+    },
+    {
+      "id": "AC-05",
+      "criterion": "用户选择落盘后，`USER_DECISION` 门的状态、批准的候选版本和 STORY-04 的领取条件彼此一致；要求补实验时仍保持阻塞并回到 STORY-03。",
+      "passed": false
+    }
+  ],
+  "context": {
+    "test_seams": [
+      "迁移待复核：选择本 Story 的最高公共 seam。"
+    ],
+    "code_anchors": [
+      "读取 STORY-01 至 STORY-03 的交接和证据；必须汇总无辅助与增强 action 的固定分母；对已运行的 Prettier/PR153 单独探测记录版本、结果和维护风险，不要求组合矩阵；写入决策包并暂停。"
+    ],
+    "authoritative_inputs": [
+      "STORY-03 执行卡与证据；Epic；agent/实验契约.json；agent/风险与阻塞.json；PR #153；Prettier 探测证据；docs/.i18n/translation-workflow.md。"
+    ],
+    "write_scope": [
+      "汇总 STORY-01 至 STORY-03 的实验结果，必须比较无辅助与增强现有 Codex action；若已运行，再汇总 Prettier 或 PR #153 的单独对照，不要求组合矩阵。比较成功率、MDX 通过率、内容保留、耗时、重试、成本和维护风险；核对 PR head 是否已基于最新 `main`，记录 Prettier 版本、格式化失败和兼容性限制，形成给用户审阅的决策包。本 Story 不接入正式工作流、不发布 CI 生产变更、不修改生成 locale 页面；报告提交后暂停，直到用户明确决定。用户决定后，维护者必须把待决标记改为已确认、记录附加条件并刷新执行卡，随后才可解除 STORY-04 的阻塞。"
+    ],
+    "stop_conditions": [
+      "若 fixture、oracle、分母或 PR 版本无法复核，或用户尚未明确选择，保持 blocked；不得用 Agent 建议、局部绿色测试或已有代码替代用户授权。"
+    ]
+  },
+  "owner": "orchestrator-pi",
+  "blocker": "STORY-03 未完成；实验结论后还需用户明确决策",
+  "updated": "2026-09-04",
+  "handoff": {
+    "summary": "交接时记录 Story、实验报告与证据路径、PR head/目标基线、用户决定或补实验请求、Git 状态和 STORY-04 的授权条件。",
+    "verification": [
+      "检查决策包、实验日志、PR 状态和版本差异；退出码、证据路径和用户决定记录齐全后，才允许解除 USER_DECISION 门禁。"
+    ],
+    "remaining": [
+      "继续 v1 Story 的剩余工作。"
+    ],
+    "risks": [],
+    "next": "按迁移后的 frontier 继续。"
+  }
+}

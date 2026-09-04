@@ -1,0 +1,17 @@
+{
+  "date": "2026-09-04",
+  "purpose": "STORY-03 收尾第二次重试：CODEX_HOME 从 personal 副本切换到默认 /root/.codex 后的环境自查与真实 opt-in 执行记录。",
+  "home_switch_reason": "上一轮使用的 CODEX_HOME（.local/story03-scratch/codex-home，personal 账号副本）所属 ChatGPT 账号不支持 gpt-5.6-sol（400 invalid_request_error）且 usage limit 至 2026-10-02；改用默认 codex home（不同账号，模型与配额均可用）。编排者已用该 home 实测 codex exec --json -m gpt-5.6-sol 返回 turn.completed。直接指向 /root/.codex，未复制凭据。",
+  "codex_home": { "path": "/root/.codex", "config_model": "gpt-5.6-sol", "config_effort": "high", "note": "与实验注入参数一致，模型可比性不变；lab 实际以 -m / -c 显式注入并 --ignore-user-config，不依赖 config.toml" },
+  "cli": { "binary": "/root/.nvm/versions/node/v24.15.0/bin/codex", "version": "codex-cli 0.153.2" },
+  "probe": {
+    "command": "cd /data/code/openclaw/docs/.local/story03-scratch/codexl-probe2 && printf 'reply with the single word OK' | timeout 150 env CODEX_HOME=/root/.codex /root/.nvm/versions/node/v24.15.0/bin/codex exec --json -m gpt-5.6-sol - 2>probe3.stderr | tail -2",
+    "outcome": "turn.completed",
+    "final_events": [
+      "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"agent_message\",\"text\":\"OK\"}}",
+      "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":14248,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":5,\"reasoning_output_tokens\":0}}"
+    ],
+    "stderr": "仅已知无害噪音：3× 'failed to refresh available models: timeout waiting for child process to exit'（429 字节），无其他错误"
+  },
+  "network": { "status": "reachable", "evidence": "probe 与真实修复 turn 均正常完成；2026-09-01 的 wss 'Operation not permitted' 与 2026-09-04 上午的账号级 400/usage-limit 均未复现" }
+}

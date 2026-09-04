@@ -1,0 +1,80 @@
+{
+  "kind": "large-task-story",
+  "schema_version": 2,
+  "id": "STORY-07",
+  "plan": "EPIC-I18N-MDX-CODEX-FALLBACK",
+  "title": "黄金验收与线上复盘",
+  "intent_version": 2,
+  "status": "blocked",
+  "blocked_by": [
+    "STORY-01",
+    "STORY-02",
+    "STORY-03",
+    "STORY-03.1",
+    "STORY-04",
+    "STORY-05",
+    "STORY-06"
+  ],
+  "covers": [
+    "GC-01",
+    "GC-02",
+    "GC-03",
+    "GC-04",
+    "GC-05",
+    "GC-06"
+  ],
+  "outcome": "团队能在真实线上运行中判断这条兜底链是否真正减少流水线浪费，并把失败样本、耗时、重试和检查器误报转化为下一轮改进，而不是凭一次绿色 CI 宣布完成。",
+  "acceptance": [
+    {
+      "id": "AC-01",
+      "criterion": "全部黄金案例在同一 acceptance commit 上有通过或带原因的失败证据。",
+      "passed": false
+    },
+    {
+      "id": "AC-02",
+      "criterion": "线上观察记录真实运行结果、失败样本、耗时和后续动作，且不泄露受控内容。",
+      "passed": false
+    },
+    {
+      "id": "AC-03",
+      "criterion": "复盘结论明确哪些问题交给增强后的现有 Codex action、哪些可由可选辅助稳定处理、哪些继续人工处理；不以不断增加自研规则为默认方向。",
+      "passed": false
+    },
+    {
+      "id": "AC-04",
+      "criterion": "计划、工作流文档和风险登记反映最新实验事实；未验证的细节仍保持待实验状态。",
+      "passed": false
+    }
+  ],
+  "context": {
+    "test_seams": [
+      "迁移待复核：选择本 Story 的最高公共 seam。"
+    ],
+    "code_anchors": [
+      "运行全部本地、CI、canary 和线上案例；汇总成功率、耗时、重试、误报、人工介入和辅助净收益；更新 action、checker、fixture 和决策文档，必要时插入修复 Story。"
+    ],
+    "authoritative_inputs": [
+      "全部前置 Story 执行卡；agent/黄金验收.json；agent/风险与阻塞.json；发布与线上日志；docs/.i18n/translation-workflow.md。"
+    ],
+    "write_scope": [
+      "在同一个 acceptance commit 上执行全部黄金案例；记录本地、独立 CI、正式 canary 和线上观察证据。线上观察作为后续模式持续收集成功率、失败类型、耗时、重试、人工介入和内容越界事件。完成窗口后更新决策文档、fixture、Codex action、可选辅助和 checker 设计，必要时插入修复 Story。"
+    ],
+    "stop_conditions": [
+      "若黄金案例失败，保留证据并在本 Story 前插入修复 Story；不得降低判据。"
+    ]
+  },
+  "owner": "orchestrator-pi",
+  "blocker": "STORY-06 未完成",
+  "updated": "2026-09-04",
+  "handoff": {
+    "summary": "交接时记录 Story、清单计数、基线、命令/退出码、证据路径、Git 状态和下一 Story 输入。",
+    "verification": [
+      "最终 verification 必须列出 GC-01 至 GC-06、证据位置、固定分母和线上观察窗口。"
+    ],
+    "remaining": [
+      "继续 v1 Story 的剩余工作。"
+    ],
+    "risks": [],
+    "next": "按迁移后的 frontier 继续。"
+  }
+}

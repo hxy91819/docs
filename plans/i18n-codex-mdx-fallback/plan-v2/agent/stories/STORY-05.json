@@ -1,0 +1,75 @@
+{
+  "kind": "large-task-story",
+  "schema_version": 2,
+  "id": "STORY-05",
+  "plan": "EPIC-I18N-MDX-CODEX-FALLBACK",
+  "title": "建立独立 CI 验证子流水线",
+  "intent_version": 3,
+  "status": "blocked",
+  "blocked_by": [
+    "STORY-04"
+  ],
+  "covers": [
+    "GC-04",
+    "GC-05"
+  ],
+  "outcome": "在正式翻译工作流之外，可以单独触发增强后的现有 Codex repair action 和可选辅助实验，先验证 GitHub runner、权限、工具链和日志，再决定是否影响生产。",
+  "acceptance": [
+    {
+      "id": "AC-01",
+      "criterion": "子流水线可独立触发，并在干净 GitHub runner 上安装和运行模块。",
+      "passed": false
+    },
+    {
+      "id": "AC-02",
+      "criterion": "fixture 测试、MDX 验收、越界检查和日志 artifact 均有可下载证据。",
+      "passed": false
+    },
+    {
+      "id": "AC-03",
+      "criterion": "CI 证据能证明只有一个 Codex action，且可选辅助（如启用）先于它或失败后回退；最终 parser/scope gate 未被绕过。",
+      "passed": false
+    },
+    {
+      "id": "AC-04",
+      "criterion": "默认运行不会修改生产分支或发布线上内容；实验模式的权限和输入明确。",
+      "passed": false
+    },
+    {
+      "id": "AC-05",
+      "criterion": "真实 Codex 环境异常能分类报告，不伪装成 fixture 修复成功。",
+      "passed": false
+    }
+  ],
+  "context": {
+    "test_seams": [
+      "迁移待复核：选择本 Story 的最高公共 seam。"
+    ],
+    "code_anchors": [
+      "新增 workflow_dispatch/workflow_call 入口；固定批准的 action、可选辅助版本、目标基线和与正式任务一致的 Node/Codex/MDX 工具链；分别运行离线模块测试和可选真实 Codex 测试；验证单一 action、辅助回退、checker/parser 顺序；上传脱敏 evidence 并区分离线、Agent、环境失败。"
+    ],
+    "authoritative_inputs": [
+      "STORY-04 交接；STORY-03.1 决策包；.github/workflows/；.github/scripts/i18n/；agent/黄金验收.json；PR #153/Prettier 固定实验资料；GitHub Actions 权限文档。"
+    ],
+    "write_scope": [
+      "建立可由 `workflow_dispatch` 和可复用调用触发的子流水线。它读取固定 fixture，安装与正式任务一致的 Codex/MDX 工具链，运行离线模块测试和可选真实 Codex 测试，验证增强现有 action 的单一执行入口、轻量检查和 MDX 验收；Prettier 与 PR #153 只作为固定版本的可选实验臂，失败即回退到现有 action。上传脱敏证据。默认不提交 locale、不触发线上发布；支持明确的实验参数和失败摘要。没有 STORY-03.1 的用户决策记录时，只允许 fixture-only 验证，不得模拟生产接入。"
+    ],
+    "stop_conditions": [
+      "若 CI 需要生产写权限才能测试模块、出现第二个 Codex action 或辅助绕过最终 parser/scope gate，停止并调整隔离设计。"
+    ]
+  },
+  "owner": "orchestrator-pi",
+  "blocker": "STORY-04 未完成",
+  "updated": "2026-09-04",
+  "handoff": {
+    "summary": "交接时记录 Story、清单计数、基线、命令/退出码、证据路径、Git 状态和下一 Story 输入。",
+    "verification": [
+      "workflow run URL、job summary、artifact 列表和权限检查结果。"
+    ],
+    "remaining": [
+      "继续 v1 Story 的剩余工作。"
+    ],
+    "risks": [],
+    "next": "按迁移后的 frontier 继续。"
+  }
+}

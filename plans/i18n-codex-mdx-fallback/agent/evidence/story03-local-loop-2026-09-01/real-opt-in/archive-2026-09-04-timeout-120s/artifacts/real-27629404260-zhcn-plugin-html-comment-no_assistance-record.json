@@ -1,0 +1,69 @@
+{
+  "fixture_id": "real-27629404260-zhcn-plugin-html-comment",
+  "payload": "---\nread_when:\n    - 你正在安装、配置或审计 anthropic-vertex 插件\nsummary: OpenClaw Anthropic Vertex 提供商插件，用于 Google Vertex AI 上的 Claude 模型。\ntitle: Anthropic Vertex 插件\nx-i18n:\n    generated_at: \"2026-06-27T02:46:05Z\"\n    model: gpt-5.5\n    postprocess_version: locale-links-v1\n    provider: openai\n    source_hash: f772c9a5bf1edd6a270b7ba5e6d695290fe96648c9ac38d0bc90bb1504f50cd7\n    source_path: plugins/reference/anthropic-vertex.md\n    workflow: 16\n---\n\n# Anthropic Vertex 插件\n\n用于 Google Vertex AI 上 Claude 模型的 OpenClaw Anthropic Vertex 提供商插件。\n\n## 分发\n\n- 包：`@openclaw/anthropic-vertex-provider`\n- 安装路径：npm；ClawHub\n\n## 接口面\n\nproviders: anthropic-vertex\n\n<!-- openclaw-plugin-reference:manual-start -->\n\n## Claude Fable 5\n\n在你的 Google Cloud 区域中该模型可用时，使用 `anthropic-vertex/claude-fable-5`。\nFable 5 始终使用自适应思考，并默认使用 `high` 强度。`/think off` 和\n`/think minimal` 使用 `low` 强度，因为该模型不支持禁用思考。\n\n<!-- openclaw-plugin-reference:manual-end -->\n",
+  "metadata": {
+    "event": "final_outcome",
+    "fixture_id": "real-27629404260-zhcn-plugin-html-comment",
+    "run_id": "27629404260",
+    "locale": "zh-CN",
+    "source_path": "plugins-reference/anthropic-vertex.md",
+    "source_revision": "66585786970c03edf33d70b795076bca4d711b36",
+    "experiment_arm": "no_assistance",
+    "arm": "no_assistance",
+    "agent_action_version": "openai/codex-action@v1-local-equivalent",
+    "optional_aid": "none",
+    "auxiliary_version": null,
+    "repair_mode": "codex_only",
+    "repair_stage_order": [
+      "parser",
+      "auxiliary",
+      "codex",
+      "checker",
+      "scope",
+      "protected_attribute",
+      "recheck",
+      "artifact"
+    ],
+    "required_order": [
+      "完整页面组装",
+      "严格 @mdx-js/mdx parser/oracle 产生完整诊断",
+      "可选辅助（none、固定版 Prettier 或 PR #153；仅在显式实验臂启用时运行）",
+      "增强后的现有 Codex repair action（唯一 Agent 执行器）",
+      "轻量 checker、scope 和 protected-attribute 检查；拒绝时把具体错误回传同一会话并消耗有界尝试",
+      "外部严格 MDX recheck 与 artifact 门禁；仍失败则显式 per-file/per-shard failure"
+    ],
+    "parser": "@mdx-js/mdx@3.1.1 compile({jsx:true})",
+    "parser_outcome": "compile_failure",
+    "parser_diagnostics": [
+      {
+        "source": "micromark-extension-mdx-jsx",
+        "line": 29,
+        "column": 2,
+        "offset": 641
+      }
+    ],
+    "error": {
+      "source": "micromark-extension-mdx-jsx",
+      "reason": "Unexpected character `!` (U+0021) before name, expected a character that can start a name, such as a letter, `$`, or `_` (note: to create a comment in MDX, use `{/* text */}`)",
+      "error_line": 29,
+      "error_column": 2
+    },
+    "error_source": "micromark-extension-mdx-jsx",
+    "error_line": 29,
+    "error_column": 2,
+    "codex_session": null,
+    "attempt": null,
+    "repair_attempts": null,
+    "rounds": null,
+    "checker_result": "not_run",
+    "content_check": "not_run",
+    "changed_paths": [],
+    "deleted_paths": [],
+    "elapsed_ms": 10,
+    "duration_ms": 10,
+    "exit_code": 1,
+    "final_outcome": "final_failure",
+    "status": "final_failure"
+  },
+  "feedback": []
+}

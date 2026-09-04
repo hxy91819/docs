@@ -10,7 +10,7 @@
   ],
   "intent_version": 2,
   "status": "blocked",
-  "owner": "待领取",
+  "owner": "orchestrator-pi",
   "blocker": "STORY-03 未完成；实验结论后还需用户明确决策",
   "status_updated": "2026-09-01",
   "refreshed": "待领取",

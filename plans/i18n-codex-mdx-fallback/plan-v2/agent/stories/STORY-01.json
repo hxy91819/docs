@@ -1,0 +1,65 @@
+{
+  "kind": "large-task-story",
+  "schema_version": 2,
+  "id": "STORY-01",
+  "plan": "EPIC-I18N-MDX-CODEX-FALLBACK",
+  "title": "建立真实故障基线",
+  "intent_version": 3,
+  "status": "done",
+  "blocked_by": [],
+  "covers": [
+    "GC-01"
+  ],
+  "outcome": "后续实现不再依赖猜测。团队能用真实翻译流水线曾经失败的输入重放问题，并知道什么结果算修复成功、什么修改属于灾难性越界。",
+  "acceptance": [
+    {
+      "id": "AC-01",
+      "criterion": "至少一组真实失败 fixture 可在本地重复触发原始 MDX 失败，并有来源、版本和脱敏说明。",
+      "passed": true
+    },
+    {
+      "id": "AC-02",
+      "criterion": "每组 fixture 有稳定 parser oracle、内容保留判据和预期日志字段。",
+      "passed": true
+    },
+    {
+      "id": "AC-03",
+      "criterion": "实验记录至少能区分无辅助、增强现有 Codex action、检查器拦截和最终失败；若运行 Prettier/PR #153 探测，则额外记录版本、阶段和结果，不要求组合实验。",
+      "passed": true
+    },
+    {
+      "id": "AC-04",
+      "criterion": "READY 门禁所需的代码入口、环境前提和未决风险均已写入 Agent 资料。",
+      "passed": true
+    }
+  ],
+  "context": {
+    "test_seams": [
+      "迁移待复核：选择本 Story 的最高公共 seam。"
+    ],
+    "code_anchors": [
+      "审阅历史运行、现有 Codex repair action、PR #153、Prettier 探测、docs/.i18n/translation-workflow.md、现有 i18n 测试和源仓库翻译器；回放真实失败；在 agent/evidence/ 保存脱敏 fixture、版本、parser 诊断和主/可选实验说明。"
+    ],
+    "authoritative_inputs": [
+      "当前基线：plans/i18n-codex-mdx-fallback/agent/当前基线.json；Epic 全局设计；现有 handoff；现有 i18n 测试；源仓库/工作流运行 artifact；Prettier 探测证据。"
+    ],
+    "write_scope": [
+      "回顾历史 CI 运行、artifact 和 MDX 诊断；优先回放 `27629404260` 的 metadata-only 失败和 `28273967200` 的线上 R2 stale 结果。同步审阅现有 Codex repair action、[PR #153](https://github.com/openclaw/docs/pull/153) 及其 head `4d37f029f0`，并记录 Prettier 的受限探测：确认各自能看到的故障边界、与现有受保护属性修复的调用顺序，以及已覆盖和未覆盖的场景。提取具有代表性的原文、译文、失败位置和日志，冻结为本地 fixture；历史 artifact 只有 metadata 时，用关联 source/translation commit 或可复现实验重建正文，并明确标记 provenance。为每个 fixture 写出 parser oracle、内容保留判据和需要保存的证据。建立最小实验记录格式，主比较无辅助与增强现有 Codex action；只有成本低且有代表 fixture 时，才单独记录 Prettier 或 PR #153 对照，不要求组合矩阵。合成样例只补足真实样本没有覆盖的分支。"
+    ],
+    "stop_conditions": [
+      "若历史内容不可合法脱敏或 oracle 不稳定，停止并更新风险登记。"
+    ]
+  },
+  "owner": "codexp",
+  "blocker": null,
+  "updated": "2026-09-04",
+  "handoff": {
+    "summary": "worker=codexp/gpt-5.6-sol/effort=high，会话 mdx-fallback-20260901-story01-worker-1（provider 01a05c84-63b6-7e93-98e9-22654a9a5104，ACPX exit 0，continuity match，--non-interactive-permissions fail；provider 沙箱 danger-full-access 不独立强制边界，以提示词范围+编排者对账约束）。证据：plans/i18n-codex-mdx-fallback/agent/evidence/story01-real-fixtures-2026-09-01/（2 个真实 fixture：anthropic-vertex HTML comment 损坏、taxonomy Accordion/div 错配；strict-mdx-oracle.mjs 回放两次字节级一致；historical-scan 696 页 6 失败；experiment-schema 四类记录契约；无辅助基线双 fixture final_failure exit 1；provenance 含 28273967200 R2 stale）。未决：历史 artifact metadata-only 逐 shard 映射、超时/重试阈值留给后续 Story。",
+    "verification": [
+      "完成 fixture 回放、来源核对和基线报告；记录命令与退出码。"
+    ],
+    "remaining": [],
+    "risks": [],
+    "next": "按迁移后的 frontier 继续。"
+  }
+}

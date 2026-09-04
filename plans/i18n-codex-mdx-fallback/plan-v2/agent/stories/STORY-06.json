@@ -1,0 +1,70 @@
+{
+  "kind": "large-task-story",
+  "schema_version": 2,
+  "id": "STORY-06",
+  "plan": "EPIC-I18N-MDX-CODEX-FALLBACK",
+  "title": "阶段化发布上线",
+  "intent_version": 1,
+  "status": "blocked",
+  "blocked_by": [
+    "STORY-05"
+  ],
+  "covers": [
+    "GC-05",
+    "GC-06"
+  ],
+  "outcome": "经过独立 CI 验证的 fallback 以小范围、可回退方式进入正式翻译流水线，先观察少量语言或页面，再扩大范围，不让一次实验改变全部发布面。",
+  "acceptance": [
+    {
+      "id": "AC-01",
+      "criterion": "canary 能在不影响其他语言的情况下完成修复、检查、artifact 和发布验证。",
+      "passed": false
+    },
+    {
+      "id": "AC-02",
+      "criterion": "fallback 可被关闭并恢复原有失败路径，回退动作经过演练。",
+      "passed": false
+    },
+    {
+      "id": "AC-03",
+      "criterion": "发布摘要明确列出 Codex 修复、检查拦截、失败页面和剩余风险。",
+      "passed": false
+    },
+    {
+      "id": "AC-04",
+      "criterion": "生产接入前 RELEASE 门禁所需的 CI、权限、范围和文档证据齐全。",
+      "passed": false
+    }
+  ],
+  "context": {
+    "test_seams": [
+      "迁移待复核：选择本 Story 的最高公共 seam。"
+    ],
+    "code_anchors": [
+      "定义启用开关、canary 页面/语言、发布前门禁、回退和日志；执行一次小范围发布演练；更新内部工作流文档。"
+    ],
+    "authoritative_inputs": [
+      "STORY-05 证据；agent/门禁.json；现有 translation-workflow.md；translate-finalize 与 R2/Pages 发布流程。"
+    ],
+    "write_scope": [
+      "制定启用开关、canary 范围、发布前门禁、回退动作和变更说明；先部署到单语言或单页路径，再逐步扩大。确认 Codex 权限、artifact 范围、日志保留和失败状态符合现有发布策略。把稳定后的操作说明写入工作流内部文档，不修改生成页面。"
+    ],
+    "stop_conditions": [
+      "若线上出现未拦截灾难性删除，立即关闭开关并回退。"
+    ]
+  },
+  "owner": "orchestrator-pi",
+  "blocker": "STORY-05 未完成",
+  "updated": "2026-09-04",
+  "handoff": {
+    "summary": "交接时记录 Story、清单计数、基线、命令/退出码、证据路径、Git 状态和下一 Story 输入。",
+    "verification": [
+      "canary commit、workflow run、live smoke、回退记录和文档 diff。"
+    ],
+    "remaining": [
+      "继续 v1 Story 的剩余工作。"
+    ],
+    "risks": [],
+    "next": "按迁移后的 frontier 继续。"
+  }
+}

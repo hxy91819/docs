@@ -9,12 +9,12 @@
     "STORY-02"
   ],
   "intent_version": 3,
-  "status": "todo",
-  "owner": "待领取",
-  "blocker": "无",
+  "status": "blocked",
+  "owner": "codexp",
+  "blocker": "真实 Codex opt-in 需要出网；全部 worker 路由的会话沙箱禁止网络，等待用户授权执行面。离线部分已全部交付并通过测试。",
   "status_updated": "2026-09-01",
-  "refreshed": "待领取",
-  "code_baseline": "待领取",
+  "refreshed": "2026-09-01",
+  "code_baseline": "b18331f5f3",
   "owns": [
     "LOCAL_LOOP"
   ],
@@ -50,5 +50,5 @@
   "steps": "1. 实现本地驱动；判据：无 CI 也能跑 fixture。\n2. 加入 checker feedback；判据：失败错误回到同一会话。\n3. 跑真实集成；判据：有凭据时产生可编译结果，无凭据时状态可分类。",
   "verification": "离线测试命令、真实测试命令/退出码、日志路径和 fixture 结果。",
   "stop_conditions": "若 Agent 修改范围无法被 checker 或 parser 验收、辅助不能在临时副本安全丢弃、或实验不能区分增强 action 与辅助贡献，停止并回到契约修订；不得绕过 STORY-03.1 进入生产。",
-  "handoff": "交接时记录 Story、清单计数、基线、命令/退出码、证据路径、Git 状态和下一 Story 输入。"
+  "handoff": "worker=codexp/gpt-5.6-sol/high 会话 mdx-fallback-20260901-story03-worker-1（provider 01a05ca4-7dd9-75c2-958b-4f044e61180c；初版+patch1+patch2 三轮，全 session continuity match）。交付：tools/mdx-fallback-lab/ 六阶段闭环模块（stdin=ignore、MDX_LAB_MODEL/EFFORT/CODEX_HOME 可注入、辅助臂 fail-closed=auxiliary_not_implemented、HARD_TIMEOUT_MS/MAX_ATTEMPTS/checker 阈值注入缺省 fail-closed）；npm test 含 no_assistance 臂断言+辅助臂 fail-closed 断言+checker 两行为断言；离线 mock 修复两个真实 fixture；证据 plans/i18n-codex-mdx-fallback/agent/evidence/story03-local-loop-2026-09-01/。环境阻塞链（均有 stderr 证据）：①初版嵌套 codex EROFS→CODEX_HOME 隔离到 .local/story03-scratch/codex-home 解决；②worker 会话沙箱禁网 wss://chatgpt.com（seccomp 层，子进程不可逃逸）。路由走查（route default 数组穷尽）：codexp network_denied（patch2 实测）→codex 未注册 acpx agents（config 证据）→codexl network_denied（worker-3 探针 01a05cd7 实测）→kiro PERMISSION_PROMPT_UNAVAILABLE（worker-2-kiro acpx exit 5 实测）。复跑命令与参数见 evidence/story03-local-loop-2026-09-01/README.md 与 real-opt-in/commands.json。等待用户选择执行面后即可收口 STORY-03。"
 }
