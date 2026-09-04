@@ -5,7 +5,7 @@
   "plan": "EPIC-I18N-MDX-CODEX-FALLBACK",
   "title": "阶段化发布上线",
   "intent_version": 1,
-  "status": "blocked",
+  "status": "in_progress",
   "blocked_by": [
     "STORY-05"
   ],
@@ -38,13 +38,21 @@
   ],
   "context": {
     "test_seams": [
-      "迁移待复核：选择本 Story 的最高公共 seam。"
+      ".github/scripts/i18n/tests/test_i18n_scripts.py（开关/canary 配置/回退分类的新断言）",
+      "mdx-repair-validation.yml（workflow_call 复用；classification 输出作为发布前门禁信号）",
+      "YAML 解析+本地干跑（开关关闭=原失败路径的等价性）"
     ],
     "code_anchors": [
-      "定义启用开关、canary 页面/语言、发布前门禁、回退和日志；执行一次小范围发布演练；更新内部工作流文档。"
+      "translate-locale-reusable.yml：canary 开关（workflow_dispatch inputs/env：启用开关、canary locale/页面范围）",
+      "translate-finalize/R2/Pages 发布链：mdx_repair_failed_paths 摘要进入发布说明；R2 上传与 Pages dispatch 的完整性（历史 28273967200 R2 stale 教训）",
+      "mdx-repair-validation.yml：发布前门禁信号（classification）",
+      "docs/.i18n/translation-workflow.md：操作说明文档（有未提交并行改动，追加须谨慎保留）"
     ],
     "authoritative_inputs": [
-      "STORY-05 证据；agent/门禁.json；现有 translation-workflow.md；translate-finalize 与 R2/Pages 发布流程。"
+      "STORY-05 handoff（workflow_call 复用、classification 契约、artifact 命名）",
+      "D-09/D-10 决策；agent/门禁.json（v1 树，RELEASE 门禁定义）",
+      "历史教训：当前基线.json 的 live_failure（R2 stale）与 historical_failure（shard 损失）",
+      "GC-06：canary→scoped publish→live smoke→observation→rollback 可回退链"
     ],
     "write_scope": [
       "制定启用开关、canary 范围、发布前门禁、回退动作和变更说明；先部署到单语言或单页路径，再逐步扩大。确认 Codex 权限、artifact 范围、日志保留和失败状态符合现有发布策略。把稳定后的操作说明写入工作流内部文档，不修改生成页面。"
@@ -53,18 +61,24 @@
       "若线上出现未拦截灾难性删除，立即关闭开关并回退。"
     ]
   },
-  "owner": "orchestrator-pi",
-  "blocker": "STORY-05 未完成",
+  "owner": "native-worker-codex-5",
+  "blocker": null,
   "updated": "2026-09-04",
   "handoff": {
-    "summary": "交接时记录 Story、清单计数、基线、命令/退出码、证据路径、Git 状态和下一 Story 输入。",
+    "summary": "STORY-06 工程范围完成（真实 canary 执行待推送后与用户协调）。translate-locale-reusable.yml：mdx_repair_enabled（默认 false=原失败路径等价，validator 独立复核 failure_reason 链路）/canary_locales/canary_paths/canary_gate_failure_policy(fallback|abort)；mdx-repair-gate 前置作业复用 mdx-repair-validation.yml（real_codex:true, secrets inherit）；15 个 relay 步骤条件追加开关；发布前 Consume gate（abort 先于任何发布动作）；发布后 r2-smoke（28273967200 R2 stale 教训）+ release summary。新增 mdx_repair_canary.py decide/gate/summary/r2-smoke；操作文档 docs/.i18n/mdx-repair-canary-operations.md。pytest 158 passed；validator=delegate CONTINUE（等价性、门禁三态 CLI、发布安全顺序、边界逐项独立复核）。",
     "verification": [
-      "canary commit、workflow run、live smoke、回退记录和文档 diff。"
+      "pytest 158 passed",
+      "等价性：表达式求值器证明关开关=pre-canary 逐步等价（15 relay 步全 skip、原大声失败路径保留）",
+      "gate 三态 CLI 干跑：success 放行/agent_failure+fallback 记录/environment_failure+abort 中止；证据缺失或不一致 fail-closed",
+      "YAML+actionlint+51 run 块 bash -n"
     ],
     "remaining": [
-      "继续 v1 Story 的剩余工作。"
+      "推送后：workflow_dispatch 回退演练入口以 mdx_repair_enabled=true + 单 locale 单页 whitelist 触发小范围演练，留存 gate-decision.json/canary-release-summary/r2-smoke/回退记录作为 AC-01/02/04 线上证据（与用户协调执行）"
     ],
-    "risks": [],
-    "next": "按迁移后的 frontier 继续。"
+    "risks": [
+      "真实 canary 消耗 Actions 配额与 agent API key；触及 canary locale 的 R2/Pages（用户协调范围）",
+      "relay 第 2-4 轮/预算耗尽仅 mock 覆盖——canary 观察点"
+    ],
+    "next": "用户授权推送+canary 演练→收集线上证据→AC passed→done→解锁 STORY-07 黄金验收。"
   }
 }

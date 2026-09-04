@@ -1,6 +1,94 @@
 name: Translate Locale Reusable
 
 on:
+  # Manual dispatch is the STORY-06 canary drill entry: every input defaults
+  # to the original failure path, so a default dispatch behaves exactly like
+  # the pre-canary workflow (relay disabled, no new publish behavior).
+  workflow_dispatch:
+    inputs:
+      locale:
+        required: true
+        type: string
+      locale_slug:
+        required: true
+        type: string
+      publish_ref:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      mode:
+        required: true
+        type: string
+      shard_index:
+        required: true
+        type: string
+      shard_total:
+        required: true
+        type: string
+      worker_parallel:
+        required: true
+        type: string
+      thinking_effort:
+        required: true
+        type: string
+      pending_limit:
+        required: false
+        default: "0"
+        type: string
+      canary_source_path:
+        required: false
+        default: ""
+        type: string
+      artifact_prefix:
+        required: false
+        default: i18n
+        type: string
+      artifact_role:
+        required: false
+        default: locale
+        type: string
+      commit_locale:
+        required: false
+        default: false
+        type: boolean
+      canary_live_path:
+        required: false
+        default: channels/line
+        type: string
+      canary_expected_h1:
+        required: false
+        default: LINE
+        type: string
+      canary_publish_required:
+        required: false
+        default: false
+        type: boolean
+      max_attempts:
+        required: false
+        default: "5"
+        type: string
+      log_rejected_body:
+        required: false
+        default: false
+        type: boolean
+      mdx_repair_enabled:
+        required: false
+        default: false
+        type: boolean
+      canary_locales:
+        required: false
+        default: ""
+        type: string
+      canary_paths:
+        required: false
+        default: ""
+        type: string
+      canary_gate_failure_policy:
+        required: false
+        default: fallback
+        type: string
   workflow_call:
     inputs:
       locale:
@@ -70,6 +158,26 @@ on:
         required: false
         default: false
         type: boolean
+      # STORY-06 canary switch: the enhanced repair relay only starts when
+      # this master switch is on AND the shard sits inside both canary
+      # whitelists AND the mdx-repair-gate validation finished successfully.
+      # Default false keeps the original failure path byte-equivalent.
+      mdx_repair_enabled:
+        required: false
+        default: false
+        type: boolean
+      canary_locales:
+        required: false
+        default: ""
+        type: string
+      canary_paths:
+        required: false
+        default: ""
+        type: string
+      canary_gate_failure_policy:
+        required: false
+        default: fallback
+        type: string
 
 # D-09 budget for the bounded Codex MDX repair relay (single entry:
 # openai/codex-action@v1). Both relay budgets are explicit overrides with
@@ -85,6 +193,14 @@ env:
 jobs:
   translate:
     name: Translate ${{ inputs.locale }} shard ${{ inputs.shard_index }}/${{ inputs.shard_total }}
+    # STORY-06: the RELEASE gate runs first when the canary switch is on; a
+    # skipped gate (switch off) must not block the original path, and a
+    # failed gate only continues under the fallback policy.
+    needs: mdx-repair-gate
+    if: >-
+      needs.mdx-repair-gate.result == 'skipped' ||
+      needs.mdx-repair-gate.result == 'success' ||
+      (needs.mdx-repair-gate.result == 'failure' && inputs.canary_gate_failure_policy == 'fallback')
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
@@ -175,6 +291,26 @@ jobs:
           CANARY_SOURCE_PATH: ${{ inputs.canary_source_path }}
         run: |
           python "${I18N_SCRIPT_DIR}/build_pending_manifest.py"
+
+      # STORY-06 canary switch: fail-closed scope decision for the enhanced
+      # relay. With the switch off this only records the decision and sets
+      # MDX_REPAIR_CANARY_ENABLED=false so every relay step below keeps the
+      # original failure path (skipped exactly as before the relay existed).
+      - name: Decide canary MDX repair scope
+        id: mdx_canary
+        if: steps.stale.outputs.skip != 'true'
+        env:
+          LOCALE: ${{ inputs.locale }}
+          LOCALE_SLUG: ${{ inputs.locale_slug }}
+          SHARD_INDEX: ${{ inputs.shard_index }}
+          SHARD_TOTAL: ${{ inputs.shard_total }}
+          MDX_REPAIR_ENABLED_INPUT: ${{ inputs.mdx_repair_enabled }}
+          CANARY_LOCALES: ${{ inputs.canary_locales }}
+          CANARY_PATHS: ${{ inputs.canary_paths }}
+          CANARY_GATE_FAILURE_POLICY: ${{ inputs.canary_gate_failure_policy }}
+          MDX_REPAIR_GATE_RESULT: ${{ needs.mdx-repair-gate.result }}
+        run: |
+          python "${I18N_SCRIPT_DIR}/mdx_repair_canary.py" decide
 
       - name: Translate changed docs into locale
         id: translate_docs
@@ -280,7 +416,7 @@ jobs:
       # diagnostics exist inside docs/<locale>. Otherwise not_run is recorded.
       - name: Decide MDX repair relay
         id: mdx_relay
-        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure'
+        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure' && env.MDX_REPAIR_CANARY_ENABLED == 'true'
         env:
           LOCALE: ${{ inputs.locale }}
           LOCALE_SLUG: ${{ inputs.locale_slug }}
@@ -291,7 +427,7 @@ jobs:
           python "${I18N_SCRIPT_DIR}/mdx_repair_relay.py" decide
 
       - name: Snapshot translated MDX repair scope
-        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure'
+        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure' && env.MDX_REPAIR_CANARY_ENABLED == 'true'
         env:
           LOCALE: ${{ inputs.locale }}
         run: |
@@ -303,7 +439,7 @@ jobs:
       # previous round's recheck diagnostics through the same file.
       - name: Repair translated MDX
         id: mdx_repair
-        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' && env.MDX_REPAIR_MAX_ATTEMPTS >= 1
+        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' && env.MDX_REPAIR_MAX_ATTEMPTS >= 1 && env.MDX_REPAIR_CANARY_ENABLED == 'true'
         continue-on-error: true
         # Per-round hard budget: HARD_TIMEOUT_MS (default 600000) plus runner margin.
         timeout-minutes: 12
@@ -322,7 +458,7 @@ jobs:
 
       - name: Enforce translated MDX repair scope
         id: mdx_scope
-        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run'
+        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' && env.MDX_REPAIR_CANARY_ENABLED == 'true'
         continue-on-error: true
         env:
           LOCALE: ${{ inputs.locale }}
@@ -332,7 +468,7 @@ jobs:
 
       - name: Recheck translated MDX
         id: mdx_recheck
-        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure' && steps.mdx_repair.outcome == 'success' && steps.mdx_scope.outcome == 'success'
+        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure' && steps.mdx_repair.outcome == 'success' && steps.mdx_scope.outcome == 'success' && env.MDX_REPAIR_CANARY_ENABLED == 'true'
         continue-on-error: true
         env:
           LOCALE: ${{ inputs.locale }}
@@ -355,7 +491,8 @@ jobs:
           steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' &&
           steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
           env.MDX_REPAIR_MAX_ATTEMPTS >= 2 && steps.mdx_repair.outcome == 'success' &&
-          steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure'
+          steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure' &&
+          env.MDX_REPAIR_CANARY_ENABLED == 'true'
         continue-on-error: true
         timeout-minutes: 12
         uses: openai/codex-action@v1
@@ -378,7 +515,8 @@ jobs:
           steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
           env.MDX_REPAIR_MAX_ATTEMPTS >= 2 && steps.mdx_repair.outcome == 'success' &&
           steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure' &&
-          steps.mdx_repair_2.outcome == 'success'
+          steps.mdx_repair_2.outcome == 'success' &&
+          env.MDX_REPAIR_CANARY_ENABLED == 'true'
         continue-on-error: true
         env:
           LOCALE: ${{ inputs.locale }}
@@ -393,7 +531,8 @@ jobs:
           steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
           env.MDX_REPAIR_MAX_ATTEMPTS >= 2 && steps.mdx_repair.outcome == 'success' &&
           steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure' &&
-          steps.mdx_repair_2.outcome == 'success' && steps.mdx_scope_2.outcome == 'success'
+          steps.mdx_repair_2.outcome == 'success' && steps.mdx_scope_2.outcome == 'success' &&
+          env.MDX_REPAIR_CANARY_ENABLED == 'true'
         continue-on-error: true
         env:
           LOCALE: ${{ inputs.locale }}
@@ -412,7 +551,8 @@ jobs:
           steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' &&
           steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
           env.MDX_REPAIR_MAX_ATTEMPTS >= 3 && steps.mdx_repair_2.outcome == 'success' &&
-          steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure'
+          steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure' &&
+          env.MDX_REPAIR_CANARY_ENABLED == 'true'
         continue-on-error: true
         timeout-minutes: 12
         uses: openai/codex-action@v1
@@ -435,7 +575,8 @@ jobs:
           steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
           env.MDX_REPAIR_MAX_ATTEMPTS >= 3 && steps.mdx_repair_2.outcome == 'success' &&
           steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure' &&
-          steps.mdx_repair_3.outcome == 'success'
+          steps.mdx_repair_3.outcome == 'success' &&
+          env.MDX_REPAIR_CANARY_ENABLED == 'true'
         continue-on-error: true
         env:
           LOCALE: ${{ inputs.locale }}
@@ -450,7 +591,8 @@ jobs:
           steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
           env.MDX_REPAIR_MAX_ATTEMPTS >= 3 && steps.mdx_repair_2.outcome == 'success' &&
           steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure' &&
-          steps.mdx_repair_3.outcome == 'success' && steps.mdx_scope_3.outcome == 'success'
+          steps.mdx_repair_3.outcome == 'success' && steps.mdx_scope_3.outcome == 'success' &&
+          env.MDX_REPAIR_CANARY_ENABLED == 'true'
         continue-on-error: true
         env:
           LOCALE: ${{ inputs.locale }}
@@ -469,7 +611,8 @@ jobs:
           steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' &&
           steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
           env.MDX_REPAIR_MAX_ATTEMPTS >= 4 && steps.mdx_repair_3.outcome == 'success' &&
-          steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure'
+          steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure' &&
+          env.MDX_REPAIR_CANARY_ENABLED == 'true'
         continue-on-error: true
         timeout-minutes: 12
         uses: openai/codex-action@v1
@@ -492,7 +635,8 @@ jobs:
           steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
           env.MDX_REPAIR_MAX_ATTEMPTS >= 4 && steps.mdx_repair_3.outcome == 'success' &&
           steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure' &&
-          steps.mdx_repair_4.outcome == 'success'
+          steps.mdx_repair_4.outcome == 'success' &&
+          env.MDX_REPAIR_CANARY_ENABLED == 'true'
         continue-on-error: true
         env:
           LOCALE: ${{ inputs.locale }}
@@ -507,7 +651,8 @@ jobs:
           steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
           env.MDX_REPAIR_MAX_ATTEMPTS >= 4 && steps.mdx_repair_3.outcome == 'success' &&
           steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure' &&
-          steps.mdx_repair_4.outcome == 'success' && steps.mdx_scope_4.outcome == 'success'
+          steps.mdx_repair_4.outcome == 'success' && steps.mdx_scope_4.outcome == 'success' &&
+          env.MDX_REPAIR_CANARY_ENABLED == 'true'
         continue-on-error: true
         env:
           LOCALE: ${{ inputs.locale }}
@@ -525,7 +670,7 @@ jobs:
       # shard's passing pages are packaged normally.
       - name: Record MDX repair relay outcome
         id: mdx_repair_report
-        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure'
+        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure' && env.MDX_REPAIR_CANARY_ENABLED == 'true'
         env:
           LOCALE: ${{ inputs.locale }}
           LOCALE_SLUG: ${{ inputs.locale_slug }}
@@ -591,10 +736,37 @@ jobs:
           } >&2
           exit 1
 
+  # STORY-06 RELEASE gate signal: when the canary switch is on and the locale
+  # is whitelisted, the frozen-fixture validation sub-pipeline must prove the
+  # repair chain inside this same run before any canary content is finalized
+  # (STORY-05 contract: classification success/agent_failure/environment_
+  # failure, artifacts mdx-repair-validation-*-<run_id>). The job fails
+  # unless the classification is success.
+  mdx-repair-gate:
+    name: MDX repair validation gate (${{ inputs.locale }})
+    permissions:
+      contents: read
+    if: >-
+      inputs.mdx_repair_enabled == true &&
+      contains(format(',{0},', inputs.canary_locales), format(',{0},', inputs.locale))
+    uses: ./.github/workflows/mdx-repair-validation.yml
+    with:
+      real_codex: true
+    secrets: inherit
+
   commit-locale:
     name: Finalize ${{ inputs.locale }} artifact
-    needs: translate
-    if: needs.translate.result == 'success' && (inputs.commit_locale || (inputs.artifact_role == 'canary' && inputs.canary_publish_required))
+    needs:
+      - translate
+      - mdx-repair-gate
+    if: >-
+      needs.translate.result == 'success' &&
+      (
+        needs.mdx-repair-gate.result == 'skipped' ||
+        needs.mdx-repair-gate.result == 'success' ||
+        (needs.mdx-repair-gate.result == 'failure' && inputs.canary_gate_failure_policy == 'fallback')
+      ) &&
+      (inputs.commit_locale || (inputs.artifact_role == 'canary' && inputs.canary_publish_required))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -623,6 +795,29 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
+
+      # STORY-06: the RELEASE gate consumes the validation classification
+      # (artifact mdx-repair-validation-real-codex-<run_id>) before anything
+      # is committed or published. Only classification=success passes;
+      # agent_failure/environment_failure are recorded and then either fall
+      # back (original failure path) or abort the canary per policy.
+      - name: Download MDX repair validation evidence
+        if: needs.mdx-repair-gate.result != 'skipped'
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: mdx-repair-validation-real-codex-${{ github.run_id }}
+          path: .openclaw-sync/mdx-repair-gate
+
+      - name: Consume MDX repair release gate
+        id: mdx_release_gate
+        if: needs.mdx-repair-gate.result != 'skipped'
+        env:
+          CANARY_GATE_FAILURE_POLICY: ${{ inputs.canary_gate_failure_policy }}
+          MDX_REPAIR_GATE_RESULT: ${{ needs.mdx-repair-gate.result }}
+        run: |
+          python "${I18N_SCRIPT_DIR}/mdx_repair_canary.py" gate \
+            --evidence-dir .openclaw-sync/mdx-repair-gate
 
       - name: Download locale artifact
         uses: actions/download-artifact@v8
@@ -731,6 +926,60 @@ jobs:
             )
             python "${I18N_SCRIPT_DIR}/dispatch_r2_pages.py" "${args[@]}"
           fi
+
+      # STORY-06 (run 28273967200 stale-R2 lesson): a Pages dispatch alone
+      # never proves R2 content landed. After the publish dispatch, compare
+      # the live page h1 against the h1 derived from the applied artifact
+      # page; when the no-wait lane skips waiting, record the explicit
+      # unverified reason instead of claiming success.
+      - name: Verify canary R2 content against artifact
+        id: r2_smoke
+        if: always() && inputs.mdx_repair_enabled == true && inputs.artifact_role == 'canary'
+        env:
+          LOCALE: ${{ inputs.locale }}
+          CANARY_LIVE_URL: https://docs.openclaw.ai/${{ inputs.locale }}/${{ inputs.canary_live_path }}
+          R2_SMOKE_REQUIRE_VERIFIED: ${{ inputs.canary_publish_required && '1' || '0' }}
+          R2_SMOKE_UNVERIFIED_REASON: ${{ inputs.canary_publish_required && '' || 'dispatch_no_wait_final_publication_covered_by_locale_full_deploys' }}
+        run: |
+          python "${I18N_SCRIPT_DIR}/mdx_repair_canary.py" r2-smoke \
+            --locale "${LOCALE}" \
+            --page-path "${{ inputs.canary_live_path }}" \
+            --live-url "${CANARY_LIVE_URL}" \
+            --timeout-seconds 120 --poll-seconds 10
+
+      # STORY-06 release notes (AC-03): repaired pages with repair_mode and
+      # rounds, checker intercepted pages, failed pages, remaining risks, and
+      # the explicit R2/Pages integrity record.
+      - name: Record canary release summary
+        id: release_summary
+        if: always() && inputs.mdx_repair_enabled == true
+        env:
+          LOCALE: ${{ inputs.locale }}
+          LOCALE_SLUG: ${{ inputs.locale_slug }}
+          SHARD_INDEX: ${{ inputs.shard_index }}
+          SHARD_TOTAL: ${{ inputs.shard_total }}
+          ARTIFACT_DIR: .openclaw-sync/i18n-artifacts/${{ inputs.locale_slug }}-s${{ inputs.shard_index }}of${{ inputs.shard_total }}
+          ARTIFACT_ROLE: ${{ inputs.artifact_role }}
+          CANARY_GATE_FAILURE_POLICY: ${{ inputs.canary_gate_failure_policy }}
+          GATE_DECISION: ${{ steps.mdx_release_gate.outputs.gate_decision || 'not_applicable' }}
+          GATE_CLASSIFICATION: ${{ steps.mdx_release_gate.outputs.classification || '' }}
+          GATE_REASON: ${{ steps.mdx_release_gate.outputs.reason || '' }}
+          R2_SMOKE_OUTCOME: ${{ steps.r2_smoke.outputs.r2_smoke || '' }}
+          R2_SMOKE_REASON: ${{ steps.r2_smoke.outputs.r2_smoke_reason || '' }}
+          R2_SMOKE_EXPECTED_H1: ${{ steps.r2_smoke.outputs.expected_h1 || '' }}
+          PAGES_DISPATCH_WAITED: ${{ (inputs.artifact_role == 'canary' && !inputs.canary_publish_required) && 'false' || 'true' }}
+        run: |
+          python "${I18N_SCRIPT_DIR}/mdx_repair_canary.py" summary \
+            --artifact-dir "${ARTIFACT_DIR}"
+
+      - name: Upload canary release summary evidence
+        if: always() && inputs.mdx_repair_enabled == true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-canary-release-summary-${{ inputs.locale_slug }}-s${{ inputs.shard_index }}of${{ inputs.shard_total }}-${{ inputs.source_sha }}
+          path: .openclaw-sync/canary-release-summary-*.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Fail incomplete locale artifact
         if: steps.apply.outputs.incomplete_count != '0'

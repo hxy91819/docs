@@ -43,6 +43,7 @@ package_artifact = load_module("package_artifact")
 mdx_repair_scope = load_module("mdx_repair_scope")
 mdx_repair_relay = load_module("mdx_repair_relay")
 mdx_repair_validation = load_module("mdx_repair_validation")
+mdx_repair_canary = load_module("mdx_repair_canary")
 apply_artifacts = load_module("apply_artifacts")
 merge_artifact_roots = load_module("merge_artifact_roots")
 read_source_metadata = load_module("read_source_metadata")
@@ -151,7 +152,12 @@ class I18NScriptTests(unittest.TestCase):
             stdout=subprocess.PIPE,
         ).stdout.splitlines()
         changed_paths = changed + untracked
-        allowed_docs_paths = {"docs/.i18n/translation-workflow.md", "docs/.i18n/translation-ci-temporary-todo.md"}
+        allowed_docs_paths = {
+            "docs/.i18n/translation-workflow.md",
+            "docs/.i18n/translation-ci-temporary-todo.md",
+            # STORY-06 canary operations manual (repo-owned control-plane doc).
+            "docs/.i18n/mdx-repair-canary-operations.md",
+        }
         allowed_openclaw_sync_paths = {".openclaw-sync/docs-mdx-repair.md"}
         generated_docs = [
             path
@@ -4086,6 +4092,1012 @@ class MdxRepairValidationWorkflowTests(unittest.TestCase):
             self.assertTrue((evidence / "relay/zh-CN-repair-report.json").exists())
             self.assertIn("classification=agent_failure", output.read_text(encoding="utf-8"))
             self.assertIn("reason=relay_final_failure", output.read_text(encoding="utf-8"))
+
+GHA_TOKEN_RE = re.compile(
+    r"steps\.[A-Za-z0-9_]+\.outcome"
+    r"|steps\.[A-Za-z0-9_]+\.outputs\.[A-Za-z0-9_]+"
+    r"|env\.[A-Z0-9_]+"
+    r"|inputs\.[a-z0-9_]+"
+    r"|needs\.[a-z0-9-]+\.result"
+)
+
+
+def _gha_format(fmt: str, args: tuple[str, ...]) -> str:
+    # Enough of GitHub's format() for the test expressions: {0}, {1}, ...
+    # escaped as {{ }}.
+    return re.sub(r"\{(\d)\}", lambda match: args[int(match.group(1))], fmt.replace("{{", "{").replace("}}", "}"))
+
+
+def evaluate_gha_condition(expression: str, values: dict[str, object]) -> bool:
+    """Evaluate a workflow `if:` expression for a fixed scenario (dry run)."""
+
+    def substitute(match: "re.Match[str]") -> str:
+        token = match.group(0)
+        if token not in values:
+            raise AssertionError(f"no scenario value for {token}")
+        return repr(values[token])
+
+    python = GHA_TOKEN_RE.sub(substitute, expression)
+    python = python.replace("&&", " and ").replace("||", " or ")
+    functions = {
+        "true": True,
+        "false": False,
+        "contains": lambda haystack, needle: needle in haystack,
+        "format": lambda fmt, *args: _gha_format(fmt, args),
+        "replace": lambda value, old, new: str(value).replace(old, new),
+        "always": lambda: True,
+    }
+    return bool(eval(python, {"__builtins__": {}}, functions))  # noqa: S307 - test-only expression evaluation
+
+
+class MdxRepairCanaryRolloutTests(unittest.TestCase):
+    """STORY-06: staged rollout wiring and the switch-off equivalence dry run."""
+
+    RELAY_STEP_NAMES = [
+        "Decide MDX repair relay",
+        "Snapshot translated MDX repair scope",
+        "Repair translated MDX",
+        "Enforce translated MDX repair scope",
+        "Recheck translated MDX",
+        "Repair translated MDX (relay round 2)",
+        "Enforce translated MDX repair scope (relay round 2)",
+        "Recheck translated MDX (relay round 2)",
+        "Repair translated MDX (relay round 3)",
+        "Enforce translated MDX repair scope (relay round 3)",
+        "Recheck translated MDX (relay round 3)",
+        "Repair translated MDX (relay round 4)",
+        "Enforce translated MDX repair scope (relay round 4)",
+        "Recheck translated MDX (relay round 4)",
+        "Record MDX repair relay outcome",
+    ]
+    CANARY_GUARD = " && env.MDX_REPAIR_CANARY_ENABLED == 'true'"
+
+    def _workflow_text(self) -> str:
+        return (REPO_ROOT / ".github/workflows/translate-locale-reusable.yml").read_text(encoding="utf-8")
+
+    def _job_text(self, text: str, job: str) -> str:
+        match = re.search(rf"(?ms)^  {re.escape(job)}:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", text)
+        self.assertIsNotNone(match)
+        assert match is not None
+        return match.group(0)
+
+    def _job_level_if(self, job_text: str, job: str) -> str:
+        match = re.search(rf"(?ms)^  {re.escape(job)}:\n.*?^    if: >-\n((?:      [^\n]+\n)+)", job_text)
+        self.assertIsNotNone(match, f"job {job} has no folded if")
+        assert match is not None
+        return " ".join(part.strip() for part in match.group(1).splitlines())
+
+    def _parse_steps(self, job_text: str) -> list[dict[str, str]]:
+        steps: list[dict[str, str]] = []
+        for match in re.finditer(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name: |\Z)", job_text):
+            block = match.group(2)
+            id_match = re.search(r"^        id: ([A-Za-z0-9_]+)$", block, re.M)
+            condition = ""
+            cond_match = re.search(
+                r"(?ms)^        if: >-\n((?:          [^\n]+\n)+)|^        if: ([^\n]+)$", block
+            )
+            if cond_match:
+                folded, single = cond_match.group(1), cond_match.group(2)
+                condition = " ".join(part.strip() for part in folded.splitlines()) if folded else single.strip()
+            steps.append(
+                {
+                    "name": match.group(1).strip(),
+                    "id": id_match.group(1) if id_match else "",
+                    "if": condition,
+                }
+            )
+        return steps
+
+    def _pre_canary_steps(self, steps: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Model the workflow before the canary/relay chain: relay steps gone,
+        guard tokens stripped from every remaining condition."""
+        pre: list[dict[str, str]] = []
+        for step in steps:
+            if step["name"] in self.RELAY_STEP_NAMES:
+                continue
+            pre.append({**step, "if": step["if"].replace(self.CANARY_GUARD, "")})
+        return pre
+
+    def _run_plan(
+        self,
+        steps: list[dict[str, str]],
+        static: dict[str, object],
+        world_outcomes: dict[str, str],
+        world_outputs: dict[str, dict[str, str]],
+        start: str,
+    ) -> list[str]:
+        ids = sorted({step["id"] for step in steps if step["id"]})
+        output_keys = sorted({key for outputs in world_outputs.values() for key in outputs})
+        outcomes: dict[str, str] = {}
+        outputs: dict[str, dict[str, str]] = {}
+        executed: list[str] = []
+        started = False
+        for step in steps:
+            if step["name"] == start:
+                started = True
+            if not started:
+                continue
+            values: dict[str, object] = dict(static)
+            for step_id in ids:
+                values.setdefault(f"steps.{step_id}.outcome", "skipped")
+            for step_id, outcome in outcomes.items():
+                values[f"steps.{step_id}.outcome"] = outcome
+            for step_id in ids:
+                for key in output_keys:
+                    values.setdefault(f"steps.{step_id}.outputs.{key}", "")
+            for step_id, step_outputs in outputs.items():
+                for key, value in step_outputs.items():
+                    values[f"steps.{step_id}.outputs.{key}"] = value
+            ran = evaluate_gha_condition(step["if"], values) if step["if"] else True
+            if ran:
+                executed.append(step["name"])
+                if step["id"]:
+                    outcomes[step["id"]] = world_outcomes.get(step["id"], "success")
+                    outputs[step["id"]] = world_outputs.get(step["id"], {})
+            elif step["id"]:
+                outcomes[step["id"]] = "skipped"
+        return executed
+
+    def _translate_static(self, canary_enabled: bool, gate_result: str) -> dict[str, object]:
+        return {
+            "steps.stale.outputs.skip": "false",
+            "steps.pending.outputs.pending_count": "1",
+            "steps.translate_docs.outcome": "success",
+            "env.MDX_REPAIR_MAX_ATTEMPTS": 4,
+            "env.MDX_REPAIR_CANARY_ENABLED": "true" if canary_enabled else "false",
+            "inputs.canary_gate_failure_policy": "fallback",
+            "needs.mdx-repair-gate.result": gate_result,
+        }
+
+    def test_canary_switch_inputs_default_to_original_failure_path(self) -> None:
+        import yaml  # Preinstalled on GitHub runners; only used to mirror the dispatch/call input blocks.
+
+        workflow = yaml.safe_load(self._workflow_text())
+        triggers = workflow[True] if True in workflow else workflow["on"]
+        self.assertEqual(["workflow_call", "workflow_dispatch"], sorted(triggers))
+        call = triggers["workflow_call"]["inputs"]
+        dispatch = triggers["workflow_dispatch"]["inputs"]
+        self.assertEqual(sorted(call), sorted(dispatch))
+        for name, spec in call.items():
+            self.assertEqual(spec.get("default"), dispatch[name].get("default"), name)
+            self.assertEqual(spec.get("type"), dispatch[name].get("type"), name)
+        self.assertEqual(False, call["mdx_repair_enabled"]["default"])
+        self.assertEqual("", call["canary_locales"]["default"])
+        self.assertEqual("", call["canary_paths"]["default"])
+        self.assertEqual("fallback", call["canary_gate_failure_policy"]["default"])
+        self.assertEqual("boolean", call["mdx_repair_enabled"]["type"])
+
+    def test_switch_off_dry_run_matches_pre_canary_failure_path(self) -> None:
+        text = self._workflow_text()
+        translate_steps = self._parse_steps(self._job_text(text, "translate"))
+        current = [step for step in translate_steps if step["name"] != "Decide canary MDX repair scope"]
+        pre_canary = self._pre_canary_steps(current)
+
+        world_outcomes = {
+            "mdx_check": "failure",
+            "mdx_canary": "success",
+            "mdx_relay": "success",
+            "mdx_repair": "success",
+            "mdx_scope": "success",
+            "mdx_recheck": "success",
+            "package": "success",
+        }
+        world_outputs = {
+            "mdx_relay": {"decision": "run", "reason": ""},
+            "mdx_repair_report": {"final_outcome": "success", "failed_paths": ""},
+            "package": {"failed": "true", "failed_reason": "mdx repair failed"},
+        }
+        start = "Install docs MDX checker dependency"
+        for canary_enabled, gate_result in ((False, "skipped"), (False, "failure")):
+            executed = self._run_plan(
+                current,
+                self._translate_static(canary_enabled, gate_result),
+                world_outcomes,
+                world_outputs,
+                start,
+            )
+            baseline = self._run_plan(
+                pre_canary,
+                self._translate_static(canary_enabled, gate_result),
+                world_outcomes,
+                world_outputs,
+                start,
+            )
+            self.assertEqual(baseline, executed)
+            self.assertNotIn("Decide canary MDX repair scope", executed)
+            for relay_step in self.RELAY_STEP_NAMES:
+                self.assertNotIn(relay_step, executed)
+            self.assertEqual(
+                [
+                    "Install docs MDX checker dependency",
+                    "Check translated MDX",
+                    "Prepare locale artifact",
+                    "Upload locale artifact",
+                    "Fail failed locale artifact",
+                ],
+                executed,
+            )
+
+    def test_canary_enabled_dry_run_runs_bounded_relay(self) -> None:
+        text = self._workflow_text()
+        translate_steps = self._parse_steps(self._job_text(text, "translate"))
+        current = [step for step in translate_steps if step["name"] != "Decide canary MDX repair scope"]
+        world_outcomes = {
+            "mdx_check": "failure",
+            "mdx_relay": "success",
+            "mdx_repair": "success",
+            "mdx_scope": "success",
+            "mdx_recheck": "success",
+            "package": "success",
+        }
+        world_outputs = {
+            "mdx_relay": {"decision": "run", "reason": ""},
+            "mdx_repair_report": {"final_outcome": "success", "failed_paths": ""},
+            "package": {"failed": "false", "failed_reason": ""},
+        }
+        executed = self._run_plan(
+            current,
+            self._translate_static(True, "success"),
+            world_outcomes,
+            world_outputs,
+            "Install docs MDX checker dependency",
+        )
+        self.assertEqual(
+            [
+                "Install docs MDX checker dependency",
+                "Check translated MDX",
+                "Decide MDX repair relay",
+                "Snapshot translated MDX repair scope",
+                "Repair translated MDX",
+                "Enforce translated MDX repair scope",
+                "Recheck translated MDX",
+                "Record MDX repair relay outcome",
+                "Prepare locale artifact",
+                "Upload locale artifact",
+            ],
+            executed,
+        )
+        # A passing first-round recheck keeps rounds 2..4 skipped, and the
+        # failed-artifact step does not run because the relay rescued the
+        # shard inside its gates.
+        self.assertNotIn("Fail failed locale artifact", executed)
+        self.assertNotIn("Repair translated MDX (relay round 2)", executed)
+
+    def test_translate_job_waits_for_gate_and_keeps_default_path(self) -> None:
+        translate_job = self._job_text(self._workflow_text(), "translate")
+        self.assertIn("needs: mdx-repair-gate", translate_job)
+        translate_if = self._job_level_if(translate_job, "translate")
+        base = {"inputs.canary_gate_failure_policy": "fallback"}
+        self.assertTrue(evaluate_gha_condition(translate_if, {**base, "needs.mdx-repair-gate.result": "skipped"}))
+        self.assertTrue(evaluate_gha_condition(translate_if, {**base, "needs.mdx-repair-gate.result": "success"}))
+        self.assertTrue(evaluate_gha_condition(translate_if, {**base, "needs.mdx-repair-gate.result": "failure"}))
+        self.assertFalse(
+            evaluate_gha_condition(
+                translate_if,
+                {
+                    "inputs.canary_gate_failure_policy": "abort",
+                    "needs.mdx-repair-gate.result": "failure",
+                },
+            )
+        )
+        self.assertFalse(
+            evaluate_gha_condition(translate_if, {**base, "needs.mdx-repair-gate.result": "cancelled"})
+        )
+
+        decide = next(
+            step for step in self._parse_steps(translate_job) if step["name"] == "Decide canary MDX repair scope"
+        )
+        self.assertEqual("mdx_canary", decide["id"])
+        self.assertIn('python "${I18N_SCRIPT_DIR}/mdx_repair_canary.py" decide', translate_job)
+        self.assertIn("MDX_REPAIR_GATE_RESULT: ${{ needs.mdx-repair-gate.result }}", translate_job)
+        self.assertIn("MDX_REPAIR_ENABLED_INPUT: ${{ inputs.mdx_repair_enabled }}", translate_job)
+        self.assertIn("CANARY_LOCALES: ${{ inputs.canary_locales }}", translate_job)
+        self.assertIn("CANARY_PATHS: ${{ inputs.canary_paths }}", translate_job)
+        # The decision step runs before translation so the guard variable is
+        # available to every relay step condition.
+        self.assertLess(
+            translate_job.index("Decide canary MDX repair scope"),
+            translate_job.index("Translate changed docs into locale"),
+        )
+
+    def test_gate_job_reuses_validation_subpipeline_fail_closed(self) -> None:
+        gate_job = self._job_text(self._workflow_text(), "mdx-repair-gate")
+        self.assertIn("uses: ./.github/workflows/mdx-repair-validation.yml", gate_job)
+        self.assertIn("real_codex: true", gate_job)
+        self.assertIn("secrets: inherit", gate_job)
+        self.assertRegex(gate_job, r"(?ms)^    permissions:\n      contents: read\n")
+        self.assertNotIn("timeout-minutes", gate_job)
+        self.assertNotIn("codex exec", gate_job)
+        gate_if = self._job_level_if(gate_job, "mdx-repair-gate")
+        self.assertIn("inputs.mdx_repair_enabled == true", gate_if)
+        # Exact token membership, not substring matching: zh-CN2 must not
+        # enable zh-CN. canary_locales is a comma-separated list without
+        # spaces so the expression-only gate check stays exact.
+        self.assertIn(
+            "contains(format(',{0},', inputs.canary_locales), format(',{0},', inputs.locale))",
+            gate_if,
+        )
+        self.assertTrue(
+            evaluate_gha_condition(
+                gate_if,
+                {
+                    "inputs.mdx_repair_enabled": True,
+                    "inputs.canary_locales": "zh-CN,ja-JP",
+                    "inputs.locale": "zh-CN",
+                },
+            )
+        )
+        self.assertFalse(
+            evaluate_gha_condition(
+                gate_if,
+                {
+                    "inputs.mdx_repair_enabled": True,
+                    "inputs.canary_locales": "zh-CN2,ja-JP",
+                    "inputs.locale": "zh-CN",
+                },
+            )
+        )
+        self.assertFalse(
+            evaluate_gha_condition(
+                gate_if,
+                {
+                    "inputs.mdx_repair_enabled": False,
+                    "inputs.canary_locales": "zh-CN",
+                    "inputs.locale": "zh-CN",
+                },
+            )
+        )
+
+    def test_finalize_consumes_gate_before_publish_and_stays_default_when_off(self) -> None:
+        text = self._workflow_text()
+        commit_job = self._job_text(text, "commit-locale")
+        commit_if = self._job_level_if(commit_job, "commit-locale")
+        original_if = (
+            "needs.translate.result == 'success' && "
+            "(inputs.commit_locale || (inputs.artifact_role == 'canary' && inputs.canary_publish_required))"
+        )
+        combos = [
+            {"inputs.commit_locale": False, "inputs.artifact_role": "locale", "inputs.canary_publish_required": False},
+            {"inputs.commit_locale": True, "inputs.artifact_role": "locale", "inputs.canary_publish_required": False},
+            {"inputs.commit_locale": False, "inputs.artifact_role": "canary", "inputs.canary_publish_required": True},
+            {"inputs.commit_locale": False, "inputs.artifact_role": "canary", "inputs.canary_publish_required": False},
+        ]
+        for combo in combos:
+            combo = {**combo, "needs.translate.result": "success"}
+            skipped_gate = {
+                **combo,
+                "needs.translate.result": "success",
+                "needs.mdx-repair-gate.result": "skipped",
+                "inputs.canary_gate_failure_policy": "fallback",
+            }
+            # Switch off: the new finalize condition must accept exactly the
+            # same publishes as the pre-canary condition.
+            self.assertEqual(
+                evaluate_gha_condition(original_if, combo),
+                evaluate_gha_condition(commit_if, skipped_gate),
+                combo,
+            )
+            aborted_gate = {
+                **combo,
+                "needs.translate.result": "success",
+                "needs.mdx-repair-gate.result": "failure",
+                "inputs.canary_gate_failure_policy": "abort",
+            }
+            self.assertFalse(evaluate_gha_condition(commit_if, aborted_gate))
+        fallback_gate = {
+            "inputs.commit_locale": True,
+            "inputs.artifact_role": "locale",
+            "inputs.canary_publish_required": False,
+            "needs.translate.result": "success",
+            "needs.mdx-repair-gate.result": "failure",
+            "inputs.canary_gate_failure_policy": "fallback",
+        }
+        self.assertTrue(evaluate_gha_condition(commit_if, fallback_gate))
+        self.assertFalse(
+            evaluate_gha_condition(commit_if, {**fallback_gate, "needs.translate.result": "failure"})
+        )
+
+        self.assertIn("needs:\n      - translate\n      - mdx-repair-gate", commit_job)
+        # Gate consumption happens before commit/dispatch, so abort fails
+        # before anything is published.
+        self.assertLess(
+            commit_job.index("Consume MDX repair release gate"), commit_job.index("Commit locale refresh")
+        )
+        self.assertLess(
+            commit_job.index("Consume MDX repair release gate"), commit_job.index("Dispatch locale docs deploy")
+        )
+        self.assertIn("name: mdx-repair-validation-real-codex-${{ github.run_id }}", commit_job)
+        self.assertIn('python "${I18N_SCRIPT_DIR}/mdx_repair_canary.py" gate', commit_job)
+        self.assertIn("MDX_REPAIR_GATE_RESULT: ${{ needs.mdx-repair-gate.result }}", commit_job)
+
+        # Switch off: none of the new finalize steps run.
+        static = {
+            "inputs.commit_locale": True,
+            "inputs.artifact_role": "locale",
+            "inputs.canary_publish_required": False,
+            "inputs.mdx_repair_enabled": False,
+            "inputs.canary_gate_failure_policy": "fallback",
+            "needs.translate.result": "success",
+            "needs.mdx-repair-gate.result": "skipped",
+        }
+        world_outputs = {
+            "apply": {"changed_count": "1", "incomplete_count": "0"},
+            "locale_commit": {"committed": "true"},
+        }
+        executed = self._run_plan(
+            self._parse_steps(commit_job),
+            static,
+            {"apply": "success", "locale_commit": "success"},
+            world_outputs,
+            "Apply locale artifact",
+        )
+        for new_step in (
+            "Download MDX repair validation evidence",
+            "Consume MDX repair release gate",
+            "Verify canary R2 content against artifact",
+            "Record canary release summary",
+            "Upload canary release summary evidence",
+        ):
+            self.assertNotIn(new_step, executed)
+        self.assertIn("Commit locale refresh", executed)
+        self.assertIn("Dispatch locale docs deploy", executed)
+
+    def test_canary_finalize_steps_run_only_for_enabled_canary(self) -> None:
+        commit_job = self._job_text(self._workflow_text(), "commit-locale")
+        static = {
+            "inputs.commit_locale": False,
+            "inputs.artifact_role": "canary",
+            "inputs.canary_publish_required": True,
+            "inputs.mdx_repair_enabled": True,
+            "inputs.canary_gate_failure_policy": "fallback",
+            "needs.translate.result": "success",
+            "needs.mdx-repair-gate.result": "success",
+            "steps.locale_commit.outputs.committed": "",
+        }
+        world_outputs = {"apply": {"changed_count": "1", "incomplete_count": "0"}}
+        executed = self._run_plan(
+            self._parse_steps(commit_job),
+            static,
+            {
+                "apply": "success",
+                "mdx_release_gate": "success",
+                "r2_smoke": "success",
+                "release_summary": "success",
+            },
+            world_outputs,
+            "Check out latest main",
+        )
+        for new_step in (
+            "Download MDX repair validation evidence",
+            "Consume MDX repair release gate",
+            "Verify canary R2 content against artifact",
+            "Record canary release summary",
+            "Upload canary release summary evidence",
+        ):
+            self.assertIn(new_step, executed)
+        self.assertIn("Dispatch locale docs deploy", executed)
+        self.assertIn('python "${I18N_SCRIPT_DIR}/mdx_repair_canary.py" r2-smoke', commit_job)
+        self.assertIn('python "${I18N_SCRIPT_DIR}/mdx_repair_canary.py" summary', commit_job)
+        self.assertIn("canary-release-summary-${{ inputs.locale_slug }}", commit_job)
+        self.assertIn("retention-days: 14", commit_job)
+
+    def test_every_relay_step_condition_carries_canary_guard(self) -> None:
+        translate_job = self._job_text(self._workflow_text(), "translate")
+        by_name = {step["name"]: step for step in self._parse_steps(translate_job)}
+        for relay_step in self.RELAY_STEP_NAMES:
+            self.assertIn(self.CANARY_GUARD, by_name[relay_step]["if"], relay_step)
+        guarded = [step for step in self._parse_steps(translate_job) if self.CANARY_GUARD in step["if"]]
+        self.assertEqual(
+            sorted(self.RELAY_STEP_NAMES),
+            sorted(step["name"] for step in guarded),
+        )
+        # The strict check and packaging belong to the original path and are
+        # never gated by the canary.
+        self.assertNotIn(self.CANARY_GUARD, by_name["Check translated MDX"]["if"])
+        self.assertNotIn(self.CANARY_GUARD, by_name["Prepare locale artifact"]["if"])
+
+
+class MdxRepairCanaryTests(unittest.TestCase):
+    """STORY-06: canary switch, RELEASE gate, release summary, and R2 smoke."""
+
+    def _decide(
+        self, repo: Path, manifest_pages: list[str] | None = None, **overrides: str
+    ) -> tuple[dict[str, object], str, str]:
+        output = repo / "github-output.txt"
+        env_file = repo / "github-env.txt"
+        values = {
+            "LOCALE": "zh-CN",
+            "LOCALE_SLUG": "zh-CN",
+            "SHARD_INDEX": "0",
+            "SHARD_TOTAL": "1",
+            "MDX_REPAIR_ENABLED_INPUT": "false",
+            "CANARY_LOCALES": "",
+            "CANARY_PATHS": "",
+            "CANARY_GATE_FAILURE_POLICY": "fallback",
+            "MDX_REPAIR_GATE_RESULT": "skipped",
+            "GITHUB_OUTPUT": str(output),
+            "GITHUB_ENV": str(env_file),
+        }
+        values.update(overrides)
+        if manifest_pages is not None:
+            manifest = repo / ".openclaw-sync/docs-i18n-zh-CN-s0of1.txt"
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            manifest.write_text("".join(f"{repo / page}\n" for page in manifest_pages), encoding="utf-8")
+        with chdir(repo), env(values):  # type: ignore[arg-type]
+            mdx_repair_canary.decide_command(repo)
+        decision = json.loads(
+            (repo / ".openclaw-sync/mdx/zh-CN-canary-decision.json").read_text(encoding="utf-8")
+        )
+        return decision, output.read_text(encoding="utf-8"), env_file.read_text(encoding="utf-8")
+
+    def test_decide_switch_off_records_original_failure_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            decision, output, env_file = self._decide(repo, MDX_REPAIR_ENABLED_INPUT="false")
+            self.assertFalse(decision["enabled"])
+            self.assertEqual("switch_off", decision["reason"])
+            self.assertIn("enabled=false", output)
+            self.assertIn(f"{mdx_repair_canary.CANARY_ENV_VAR}=false", env_file)
+
+    def test_decide_requires_filled_whitelists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            pages = ["docs/channels/line.md"]
+            decision, _, _ = self._decide(
+                repo, manifest_pages=pages, MDX_REPAIR_ENABLED_INPUT="true", CANARY_LOCALES=""
+            )
+            self.assertEqual("canary_locales_empty", decision["reason"])
+
+            decision, _, _ = self._decide(
+                repo,
+                manifest_pages=pages,
+                MDX_REPAIR_ENABLED_INPUT="true",
+                CANARY_LOCALES="ja-JP",
+                CANARY_PATHS="channels",
+            )
+            self.assertEqual("locale_not_in_canary_scope", decision["reason"])
+
+            decision, _, _ = self._decide(
+                repo,
+                manifest_pages=pages,
+                MDX_REPAIR_ENABLED_INPUT="true",
+                CANARY_LOCALES="zh-CN",
+                CANARY_PATHS="",
+            )
+            self.assertEqual("canary_paths_empty", decision["reason"])
+
+    def test_decide_locale_membership_is_exact_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            pages = ["docs/channels/line.md"]
+            # Substring traps (zh-CN inside zh-CN2) must not enable the canary.
+            decision, _, _ = self._decide(
+                repo,
+                manifest_pages=pages,
+                MDX_REPAIR_ENABLED_INPUT="true",
+                CANARY_LOCALES="zh-CN2",
+                CANARY_PATHS="channels",
+                MDX_REPAIR_GATE_RESULT="success",
+            )
+            self.assertEqual("locale_not_in_canary_scope", decision["reason"])
+
+            decision, output, env_file = self._decide(
+                repo,
+                manifest_pages=pages,
+                MDX_REPAIR_ENABLED_INPUT="true",
+                CANARY_LOCALES="zh-CN, ja-JP",
+                CANARY_PATHS="channels",
+                MDX_REPAIR_GATE_RESULT="success",
+            )
+            self.assertTrue(decision["enabled"])
+            self.assertEqual("canary_enabled", decision["reason"])
+            self.assertIn("enabled=true", output)
+            self.assertIn(f"{mdx_repair_canary.CANARY_ENV_VAR}=true", env_file)
+
+    def test_decide_rejects_pending_pages_outside_canary_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            decision, _, _ = self._decide(
+                repo,
+                manifest_pages=["docs/channels/line.md", "docs/guide/other.md"],
+                MDX_REPAIR_ENABLED_INPUT="true",
+                CANARY_LOCALES="zh-CN",
+                CANARY_PATHS="channels",
+                MDX_REPAIR_GATE_RESULT="success",
+            )
+            self.assertFalse(decision["enabled"])
+            self.assertTrue(str(decision["reason"]).startswith("pending_paths_outside_canary_scope"))
+            self.assertIn("docs/zh-CN/guide/other.md", decision["pending_pages_outside_canary_scope"])
+
+            # Directory prefixes and exact file paths both stay inside scope.
+            decision, _, _ = self._decide(
+                repo,
+                manifest_pages=["docs/channels/line.md", "docs/channels/sub/page.md"],
+                MDX_REPAIR_ENABLED_INPUT="true",
+                CANARY_LOCALES="zh-CN",
+                CANARY_PATHS="channels channels/line.md",
+                MDX_REPAIR_GATE_RESULT="success",
+            )
+            self.assertTrue(decision["enabled"])
+
+    def test_decide_requires_validation_gate_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            base = {
+                "manifest_pages": ["docs/channels/line.md"],
+                "MDX_REPAIR_ENABLED_INPUT": "true",
+                "CANARY_LOCALES": "zh-CN",
+                "CANARY_PATHS": "channels/line.md",
+            }
+            decision, _, env_file = self._decide(repo, **base, MDX_REPAIR_GATE_RESULT="success")
+            self.assertTrue(decision["enabled"])
+            self.assertIn(f"{mdx_repair_canary.CANARY_ENV_VAR}=true", env_file)
+
+            decision, _, _ = self._decide(repo, **base, MDX_REPAIR_GATE_RESULT="failure")
+            self.assertFalse(decision["enabled"])
+            self.assertEqual("validation_gate_failure", decision["reason"])
+
+            decision, _, _ = self._decide(repo, **base, MDX_REPAIR_GATE_RESULT="cancelled")
+            self.assertFalse(decision["enabled"])
+            self.assertEqual("validation_gate_cancelled", decision["reason"])
+
+    def test_decide_invalid_policy_fails_closed_only_when_switch_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            decision, _, _ = self._decide(repo, CANARY_GATE_FAILURE_POLICY="yolo")
+            self.assertEqual("switch_off", decision["reason"])
+
+            with self.assertRaisesRegex(SystemExit, "CANARY_GATE_FAILURE_POLICY"):
+                self._decide(
+                    repo,
+                    manifest_pages=["docs/channels/line.md"],
+                    MDX_REPAIR_ENABLED_INPUT="true",
+                    CANARY_LOCALES="zh-CN",
+                    CANARY_PATHS="channels",
+                    CANARY_GATE_FAILURE_POLICY="yolo",
+                )
+
+    def _gate(self, repo: Path, evidence: dict[str, object] | None, **overrides: str) -> tuple[dict[str, object], str]:
+        output = repo / "github-output.txt"
+        evidence_dir = repo / ".openclaw-sync/mdx-repair-gate"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        classification = evidence_dir / "classification.json"
+        if evidence is not None:
+            classification.write_text(json.dumps(evidence), encoding="utf-8")
+        else:
+            classification.unlink(missing_ok=True)
+        values = {
+            "MDX_REPAIR_GATE_RESULT": "success",
+            "CANARY_GATE_FAILURE_POLICY": "fallback",
+            "GITHUB_OUTPUT": str(output),
+        }
+        values.update(overrides)
+        with chdir(repo), env(values):  # type: ignore[arg-type]
+            mdx_repair_canary.gate_command(evidence_dir)
+        record = json.loads((evidence_dir / "gate-decision.json").read_text(encoding="utf-8"))
+        return record, output.read_text(encoding="utf-8")
+
+    def test_gate_passes_only_with_success_classification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            record, output = self._gate(
+                repo, {"classification": "success", "reason": "frozen_fixtures_pass_strict_recheck"}
+            )
+            self.assertEqual("pass", record["gate_decision"])
+            self.assertEqual("success", record["classification"])
+            self.assertIn("gate_decision=pass", output)
+
+            with self.assertRaisesRegex(SystemExit, "classification evidence is missing"):
+                self._gate(repo, None)
+
+            with self.assertRaisesRegex(SystemExit, "classification evidence says agent_failure"):
+                self._gate(repo, {"classification": "agent_failure", "reason": "relay_final_failure"})
+
+    def test_gate_fallback_records_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            record, output = self._gate(
+                repo,
+                {"classification": "agent_failure", "reason": "relay_final_failure"},
+                MDX_REPAIR_GATE_RESULT="failure",
+                CANARY_GATE_FAILURE_POLICY="fallback",
+            )
+            self.assertEqual("fallback", record["gate_decision"])
+            self.assertEqual("agent_failure", record["classification"])
+            self.assertIn("gate_decision=fallback", output)
+            self.assertIn("classification=agent_failure", output)
+
+            record, _ = self._gate(
+                repo,
+                {"classification": "environment_failure", "reason": "preflight_failed_quota_exhausted"},
+                MDX_REPAIR_GATE_RESULT="failure",
+                CANARY_GATE_FAILURE_POLICY="fallback",
+            )
+            self.assertEqual("environment_failure", record["classification"])
+
+            # A failed gate without evidence still records the decision.
+            record, _ = self._gate(repo, None, MDX_REPAIR_GATE_RESULT="failure")
+            self.assertEqual("fallback", record["gate_decision"])
+            self.assertEqual("unknown", record["classification"])
+            self.assertEqual("classification_evidence_missing", record["reason"])
+
+            # Evidence contradicting the failed gate result fails closed.
+            with self.assertRaisesRegex(SystemExit, "classification evidence says success"):
+                self._gate(repo, {"classification": "success"}, MDX_REPAIR_GATE_RESULT="failure")
+
+    def test_gate_abort_records_before_failing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            output = repo / "github-output.txt"
+            evidence_dir = repo / ".openclaw-sync/mdx-repair-gate"
+            evidence_dir.mkdir(parents=True)
+            (evidence_dir / "classification.json").write_text(
+                json.dumps({"classification": "environment_failure", "reason": "preflight_failed_quota"}),
+                encoding="utf-8",
+            )
+            with chdir(repo), env(
+                {
+                    "MDX_REPAIR_GATE_RESULT": "failure",
+                    "CANARY_GATE_FAILURE_POLICY": "abort",
+                    "GITHUB_OUTPUT": str(output),
+                }
+            ):
+                with self.assertRaisesRegex(SystemExit, "canary aborted"):
+                    mdx_repair_canary.gate_command(evidence_dir)
+            record = json.loads((evidence_dir / "gate-decision.json").read_text(encoding="utf-8"))
+            self.assertEqual("abort", record["gate_decision"])
+            self.assertIn("gate_decision=abort", output.read_text(encoding="utf-8"))
+
+    def test_gate_skipped_when_canary_off(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            record, output = self._gate(repo, None, MDX_REPAIR_GATE_RESULT="skipped")
+            self.assertEqual("not_applicable", record["gate_decision"])
+            self.assertIn("gate_decision=not_applicable", output)
+
+    def _summary(self, repo: Path, artifact: dict[str, object], **overrides: str) -> tuple[dict[str, object], str]:
+        artifact_dir = repo / ".openclaw-sync/i18n-artifacts/zh-CN-s0of1"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / "metadata.json").write_text(json.dumps(artifact), encoding="utf-8")
+        summary_file = repo / "step-summary.md"
+        values = {
+            "LOCALE": "zh-CN",
+            "LOCALE_SLUG": "zh-CN",
+            "SHARD_INDEX": "0",
+            "SHARD_TOTAL": "1",
+            "ARTIFACT_ROLE": "canary",
+            "GATE_DECISION": "pass",
+            "GATE_CLASSIFICATION": "success",
+            "GATE_REASON": "validation_classification_success",
+            "CANARY_GATE_FAILURE_POLICY": "fallback",
+            "R2_SMOKE_OUTCOME": "verified",
+            "R2_SMOKE_REASON": "live_h1_matches_artifact",
+            "R2_SMOKE_EXPECTED_H1": "LINE",
+            "PAGES_DISPATCH_WAITED": "true",
+            "GITHUB_STEP_SUMMARY": str(summary_file),
+        }
+        values.update(overrides)
+        with chdir(repo), env(values):  # type: ignore[arg-type]
+            mdx_repair_canary.summary_command(artifact_dir, repo)
+        record = json.loads(
+            (repo / ".openclaw-sync/canary-release-summary-zh-CN-s0of1.json").read_text(encoding="utf-8")
+        )
+        return record, summary_file.read_text(encoding="utf-8")
+
+    def test_summary_lists_ac03_sections_and_clean_integrity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact = {
+                "mdx_repair_mode": "relay",
+                "mdx_repair_rounds": 2,
+                "mdx_repair_final_outcome": "success",
+                "mdx_repair_changed_paths": ["docs/zh-CN/channels/line.md"],
+                "mdx_repair_failed_paths": [],
+                "failed_reason": "",
+            }
+            report = {
+                "repair_mode": "relay",
+                "rounds": 2,
+                "final_outcome": "success",
+                "failure_kind": "none",
+                "changed_paths": [{"path": "docs/zh-CN/channels/line.md"}],
+                "failed_paths": [],
+                "violations": [],
+            }
+            (repo / ".openclaw-sync/i18n-artifacts/zh-CN-s0of1").mkdir(parents=True)
+            (repo / ".openclaw-sync/i18n-artifacts/zh-CN-s0of1/mdx-repair-report.json").write_text(
+                json.dumps(report), encoding="utf-8"
+            )
+            record, markdown = self._summary(repo, artifact)
+            self.assertEqual("relay", record["repair"]["repair_mode"])
+            self.assertEqual(2, record["repair"]["rounds"])
+            self.assertEqual(["docs/zh-CN/channels/line.md"], record["repair"]["repaired_pages"])
+            self.assertEqual([], record["repair"]["checker_intercepted_pages"])
+            self.assertEqual([], record["repair"]["failed_pages"])
+            self.assertEqual([], record["remaining_risks"])
+            self.assertEqual("verified", record["publish_integrity"]["r2_content"]["outcome"])
+            for fragment in (
+                "release gate: `pass`",
+                "Codex repaired pages: `docs/zh-CN/channels/line.md`",
+                "checker intercepted pages: none",
+                "failed pages: none",
+                "remaining risks: none recorded",
+                "R2 content=`verified`",
+            ):
+                self.assertIn(fragment, markdown)
+
+    def test_summary_reports_failed_checker_intercepted_and_risk_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact = {
+                "mdx_repair_mode": "relay",
+                "mdx_repair_rounds": 4,
+                "mdx_repair_final_outcome": "final_failure",
+                "mdx_repair_changed_paths": [],
+                "mdx_repair_failed_paths": ["docs/zh-CN/maturity/taxonomy.md"],
+                "failed_reason": "mdx repair failed",
+            }
+            report = {
+                "repair_mode": "relay",
+                "rounds": 4,
+                "final_outcome": "final_failure",
+                "failure_kind": "content_loss",
+                "changed_paths": [],
+                "failed_paths": [{"path": "docs/zh-CN/maturity/taxonomy.md"}],
+                "violations": [
+                    {"gate": "checker", "code": "whole_document_deleted", "path": "docs/zh-CN/maturity/taxonomy.md"}
+                ],
+            }
+            (repo / ".openclaw-sync/i18n-artifacts/zh-CN-s0of1").mkdir(parents=True)
+            (repo / ".openclaw-sync/i18n-artifacts/zh-CN-s0of1/mdx-repair-report.json").write_text(
+                json.dumps(report), encoding="utf-8"
+            )
+            record, markdown = self._summary(
+                repo,
+                artifact,
+                GATE_DECISION="fallback",
+                GATE_CLASSIFICATION="agent_failure",
+                GATE_REASON="relay_final_failure",
+                R2_SMOKE_OUTCOME="",
+                R2_SMOKE_REASON="dispatch_no_wait_final_publication_covered_by_locale_full_deploys",
+                PAGES_DISPATCH_WAITED="false",
+            )
+            self.assertEqual(
+                ["docs/zh-CN/maturity/taxonomy.md"], record["repair"]["checker_intercepted_pages"]
+            )
+            self.assertEqual(["docs/zh-CN/maturity/taxonomy.md"], record["repair"]["failed_pages"])
+            self.assertEqual(
+                [
+                    "pages_still_failing_1",
+                    "checker_intercepted_1",
+                    "relay_final_failure",
+                    "release_gate_fallback_agent_failure",
+                    "r2_content_unverified_dispatch_no_wait_final_publication_covered_by_locale_full_deploys",
+                    "pages_dispatch_not_waited",
+                ],
+                record["remaining_risks"],
+            )
+            self.assertIn("R2 content=`unverified`", markdown)
+            self.assertIn("- remaining risks:", markdown)
+
+    def test_summary_marks_missing_metadata_as_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            artifact_dir = repo / ".openclaw-sync/i18n-artifacts/zh-CN-s0of1"
+            artifact_dir.mkdir(parents=True)
+            summary_file = repo / "step-summary.md"
+            with chdir(repo), env(
+                {
+                    "LOCALE": "zh-CN",
+                    "LOCALE_SLUG": "zh-CN",
+                    "SHARD_INDEX": "0",
+                    "SHARD_TOTAL": "1",
+                    "GATE_DECISION": "not_applicable",
+                    "GITHUB_STEP_SUMMARY": str(summary_file),
+                }
+            ):
+                mdx_repair_canary.summary_command(artifact_dir, repo)
+            record = json.loads(
+                (repo / ".openclaw-sync/canary-release-summary-zh-CN-s0of1.json").read_text(encoding="utf-8")
+            )
+            self.assertIn("artifact_metadata_missing", record["remaining_risks"])
+
+    def _r2_smoke(
+        self, repo: Path, page_body: str | None, live_html: str | None, **overrides: str
+    ) -> tuple[dict[str, str], list[str]]:
+        if page_body is not None:
+            page = repo / "docs/zh-CN/channels/line.mdx"
+            page.parent.mkdir(parents=True, exist_ok=True)
+            page.write_text(page_body, encoding="utf-8")
+        fetches: list[str] = []
+
+        def fake_fetch(url: str, timeout_seconds: int = 30) -> str:
+            fetches.append(url)
+            if live_html is None:
+                raise AssertionError("fetch_text must not be called")
+            return live_html
+
+        output = repo / "github-output.txt"
+        values = {
+            "LOCALE": "zh-CN",
+            "R2_SMOKE_REQUIRE_VERIFIED": "1",
+            "R2_SMOKE_UNVERIFIED_REASON": "",
+            "GITHUB_OUTPUT": str(output),
+        }
+        values.update(overrides)
+        with chdir(repo), env(values):  # type: ignore[arg-type]
+            with patch.object(mdx_repair_canary.dispatch_r2_pages, "fetch_text", side_effect=fake_fetch):
+                mdx_repair_canary.r2_smoke_command(
+                    "zh-CN",
+                    "channels/line",
+                    "https://docs.openclaw.ai/zh-CN/channels/line",
+                    repo / "docs",
+                    2,
+                    1,
+                )
+        outputs = dict(
+            line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines() if "=" in line
+        )
+        return outputs, fetches
+
+    def test_r2_smoke_derives_expected_h1_from_artifact_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            page = "---\ntitle: LINE\n---\n\n# `LINE` channel\n\nbody\n"
+            outputs, fetches = self._r2_smoke(repo, page, "<html><h1>LINE channel</h1></html>")
+            self.assertEqual("verified", outputs["r2_smoke"])
+            self.assertEqual("LINE channel", outputs["expected_h1"])
+            self.assertEqual(1, len(fetches))
+
+    def test_r2_smoke_fails_required_on_live_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            page = "---\ntitle: LINE\n---\n\n# LINE channel\n"
+            with self.assertRaisesRegex(SystemExit, "R2 content smoke finished mismatch"):
+                self._r2_smoke(repo, page, "<html><h1>行</h1></html>")
+            outputs, _ = self._r2_smoke(repo, page, "<html><h1>行</h1></html>", R2_SMOKE_REQUIRE_VERIFIED="0")
+            self.assertEqual("mismatch", outputs["r2_smoke"])
+            self.assertTrue(outputs["r2_smoke_reason"].startswith("live_h1_mismatch"))
+
+    def test_r2_smoke_records_unverified_reason_without_fetching(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            page = "# LINE channel\n"
+            outputs, fetches = self._r2_smoke(
+                repo,
+                page,
+                None,
+                R2_SMOKE_REQUIRE_VERIFIED="0",
+                R2_SMOKE_UNVERIFIED_REASON="dispatch_no_wait_final_publication_covered_by_locale_full_deploys",
+            )
+            self.assertEqual("unverified", outputs["r2_smoke"])
+            self.assertEqual(
+                "dispatch_no_wait_final_publication_covered_by_locale_full_deploys",
+                outputs["r2_smoke_reason"],
+            )
+            self.assertEqual([], fetches)
+
+    def test_r2_smoke_marks_missing_artifact_page_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            with self.assertRaisesRegex(SystemExit, "artifact_page_missing"):
+                self._r2_smoke(repo, None, "<h1>anything</h1>")
+            outputs, _ = self._r2_smoke(repo, None, "<h1>anything</h1>", R2_SMOKE_REQUIRE_VERIFIED="0")
+            self.assertEqual("unverified", outputs["r2_smoke"])
+            self.assertTrue(outputs["r2_smoke_reason"].startswith("artifact_page_missing"))
+
+    def test_artifact_h1_skips_frontmatter_and_falls_back_to_title(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            page = repo / "page.mdx"
+            page.write_text("---\ntitle: Frontmatter Title\n---\n\nbody without heading\n", encoding="utf-8")
+            self.assertEqual(("Frontmatter Title", ""), mdx_repair_canary.artifact_h1(page))
+            page.write_text("---\ntitle: Ignored\n---\n\n# Heading Wins\n", encoding="utf-8")
+            self.assertEqual(("Heading Wins", ""), mdx_repair_canary.artifact_h1(page))
+            page.write_text("no heading at all\n", encoding="utf-8")
+            h1, note = mdx_repair_canary.artifact_h1(page)
+            self.assertEqual("", h1)
+            self.assertTrue(note.startswith("artifact_h1_missing"))
 
 
 if __name__ == "__main__":
