@@ -2,13 +2,12 @@
   "command": "node tools/mdx-fallback-lab/index.mjs",
   "environment": {
     "HARD_TIMEOUT_MS": 300000,
-    "MAX_ATTEMPTS": 4,
+    "MAX_ATTEMPTS": 2,
     "AUXILIARY_MODE": "none",
     "MDX_LAB_REAL_CODEX": "1",
     "MDX_LAB_MODEL": "gpt-5.6-sol",
     "MDX_LAB_EFFORT": "high",
-    "MDX_LAB_CODEX_HOME": "/root/.codex",
-    "MDX_LAB_APPEND": "1"
+    "MDX_LAB_CODEX_HOME": "/root/.codex"
   },
   "required_order": [
     "完整页面组装",

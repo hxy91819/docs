@@ -7,7 +7,8 @@
     "MDX_LAB_REAL_CODEX": "0",
     "MDX_LAB_MODEL": "gpt-5.6-sol",
     "MDX_LAB_EFFORT": "high",
-    "MDX_LAB_CODEX_HOME": "/root/.codex-profiles/personal"
+    "MDX_LAB_CODEX_HOME": "/root/.codex-profiles/personal",
+    "MDX_LAB_APPEND": "0"
   },
   "required_order": [
     "完整页面组装",

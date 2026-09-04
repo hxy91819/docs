@@ -5,7 +5,7 @@
   "plan": "EPIC-I18N-MDX-CODEX-FALLBACK",
   "title": "接入翻译流水线",
   "intent_version": 3,
-  "status": "blocked",
+  "status": "in_progress",
   "blocked_by": [
     "STORY-03.1"
   ],
@@ -44,13 +44,22 @@
   ],
   "context": {
     "test_seams": [
-      "迁移待复核：选择本 Story 的最高公共 seam。"
+      ".github/scripts/i18n/tests/test_i18n_scripts.py（现有修复/打包/scope 行为测试，pytest）",
+      "tools/mdx-fallback-lab（协议参考实现：npm test 9/9；只读参考不改动）",
+      "workflow YAML 有效性校验（python yaml 解析或 actionlint）"
     ],
     "code_anchors": [
-      "先复核 STORY-03.1 用户决定、批准的辅助版本和回退条件；定位现有 mdx_check、Codex repair、package_artifact、protected-attribute repair 和 finalizer；按批准顺序接入增强 action，辅助仅按批准的受控方式运行；补状态、日志、失败、部分成功和版本漂移测试。"
+      ".github/workflows/translate-locale-reusable.yml：Check translated MDX → Repair translated MDX → Enforce repair scope → Recheck 顺序；openai/codex-action@v1 唯一入口",
+      ".openclaw-sync/docs-mdx-repair.md：action 提示契约（增强点：完整页诊断触发、逐轮反馈指令、有界轮次）",
+      ".github/scripts/i18n/package_artifact.py：artifact metadata（mdx repair outcome/mode/rounds/diagnostics 落点）",
+      ".github/scripts/i18n/repair_mdx_protected_attributes.mjs 与 finalizer：受保护属性修复与部分成功语义",
+      "tools/mdx-fallback-lab/action.mjs：ROUND_INSTRUCTION 接力指令参考（D-09）"
     ],
     "authoritative_inputs": [
-      "STORY-03.1 执行卡与决策包；当前基线；translate-locale-reusable.yml；.openclaw-sync/docs-mdx-repair.md；package_artifact.py；mdx_repair_scope.py；现有测试；批准的辅助版本（如有）。"
+      "plans/i18n-codex-mdx-fallback/agent/evidence/story02-contract-2026-09-01/contract.md（冻结契约）",
+      "plan-v2/agent/plan.json spec.decisions D-09（用户决策：方案 A+接力+300s×4）",
+      "plans/i18n-codex-mdx-fallback/agent/evidence/story03-local-loop-2026-09-01/（实测协议参数与行为）",
+      "plans/i18n-codex-mdx-fallback/agent/evidence/story03.1-decision-package-2026-09-04/（决策包）"
     ],
     "write_scope": [
       "仅在 STORY-03.1 的用户决策已落盘后，把增强后的现有 action 接到完整页面 MDX 诊断、artifact 打包和受保护属性修复的正确位置；若批准某个可选辅助，明确它只运行在临时副本或受控前置阶段，失败即回到现有 Codex action，避免重复写入或绕过 parser oracle；保留成功页面和失败页面的状态边界；接入结构化日志、失败摘要和敏感信息控制。只修改源工作流、控制脚本和测试，不手写生成 locale 页面。"
@@ -59,8 +68,8 @@
       "若用户决策缺失、批准版本漂移、现有 workflow 只能整批丢弃成功结果或候选阶段与 fallback 契约冲突，先记录阻塞并停止生产接入。"
     ]
   },
-  "owner": "orchestrator-pi",
-  "blocker": "STORY-03.1 未完成",
+  "owner": "native-worker-codex-3",
+  "blocker": null,
   "updated": "2026-09-04",
   "handoff": {
     "summary": "交接时记录 Story、清单计数、基线、命令/退出码、证据路径、Git 状态和下一 Story 输入。",

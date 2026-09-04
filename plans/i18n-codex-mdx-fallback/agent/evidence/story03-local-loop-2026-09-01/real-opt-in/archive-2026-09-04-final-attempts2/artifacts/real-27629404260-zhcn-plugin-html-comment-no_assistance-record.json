@@ -59,8 +59,8 @@
     "content_check": "not_run",
     "changed_paths": [],
     "deleted_paths": [],
-    "elapsed_ms": 10,
-    "duration_ms": 10,
+    "elapsed_ms": 9,
+    "duration_ms": 9,
     "exit_code": 1,
     "final_outcome": "final_failure",
     "status": "final_failure"

@@ -52,7 +52,7 @@
     "error_line": 1075,
     "error_column": 5,
     "opening_tag_line": 975,
-    "codex_session": "4a54530e-eeff-42d5-b380-6655d4e2686a",
+    "codex_session": "40d4611a-e9d4-4178-8f44-911381be4b2d",
     "attempt": 1,
     "repair_attempts": 1,
     "rounds": 1,
@@ -62,8 +62,8 @@
       "docs/zh-CN/maturity/taxonomy.md"
     ],
     "deleted_paths": [],
-    "elapsed_ms": 541,
-    "duration_ms": 541,
+    "elapsed_ms": 521,
+    "duration_ms": 521,
     "exit_code": 1,
     "final_outcome": "checker_intercepted",
     "status": "checker_intercepted"
@@ -104,7 +104,7 @@
           "offset": 114137
         }
       ],
-      "instruction": "仅修复诊断 span；保持所有 must_preserve 项；不要重写整页。"
+      "instruction": "修复本轮反馈的全部 parser/checker 诊断；若前几轮已修复部分错误，继续修复剩余诊断直至页面通过严格编译；保持所有 must_preserve 项；不重写整页。"
     }
   ]
 }

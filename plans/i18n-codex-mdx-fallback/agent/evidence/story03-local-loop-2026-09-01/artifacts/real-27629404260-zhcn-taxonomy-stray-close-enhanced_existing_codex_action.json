@@ -40,7 +40,7 @@
     "error_line": null,
     "error_column": null,
     "opening_tag_line": 975,
-    "codex_session": "3379d4ae-c7bf-4858-99cb-0527ac0a6b3c",
+    "codex_session": "452856f4-9865-4a23-81fd-449382efb888",
     "attempt": 2,
     "repair_attempts": 2,
     "rounds": 2,
@@ -50,8 +50,8 @@
       "docs/zh-CN/maturity/taxonomy.md"
     ],
     "deleted_paths": [],
-    "elapsed_ms": 1999,
-    "duration_ms": 1999,
+    "elapsed_ms": 2000,
+    "duration_ms": 2000,
     "exit_code": 0,
     "final_outcome": "success",
     "status": "success"
@@ -77,7 +77,7 @@
           "offset": 114137
         }
       ],
-      "instruction": "仅修复诊断 span；保持所有 must_preserve 项；不要重写整页。"
+      "instruction": "修复本轮反馈的全部 parser/checker 诊断；若前几轮已修复部分错误，继续修复剩余诊断直至页面通过严格编译；保持所有 must_preserve 项；不重写整页。"
     }
   ]
 }

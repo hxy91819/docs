@@ -1,6 +1,16 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
+// D-09 multi-round relay protocol: each round repairs the diagnostics fed back in
+// that round (including errors newly surfaced by earlier repairs) until strict
+// compilation passes or the injected attempt budget is exhausted. Rounds are still
+// bounded by MAX_ATTEMPTS/HARD_TIMEOUT_MS; this is not an unbounded retry.
+export const ROUND_INSTRUCTION = "修复本轮反馈的全部 parser/checker 诊断；若前几轮已修复部分错误，继续修复剩余诊断直至页面通过严格编译；保持所有 must_preserve 项；不重写整页。";
+
+export function buildRepairPrompt({ file, failureClass, diagnostics, reason }) {
+  return `Repair ${file} using the existing OpenClaw MDX repair protocol. Multi-round relay protocol: fix all parser/checker diagnostics reported for this round; if earlier rounds already fixed part of the errors, continue fixing the remaining diagnostics until the page passes strict MDX compilation. Diagnostics may surface progressively: an error newly reported in this round's feedback is in scope. Preserve all must_preserve content; do not rewrite the whole page; do not add, delete, or rename files. Failure class: ${failureClass}. Current parser diagnostics: ${JSON.stringify(diagnostics)}. Current parser reason: ${reason ?? "unknown"}.`;
+}
+
 export function mockRepair({ source, failureClass, variant }) {
   if (variant === "taxonomy-delete-accordion") {
     const marker = "  <Accordion title=\"安全、凭证、配对和密钥 - M3 Beta - 6 个领域\">";

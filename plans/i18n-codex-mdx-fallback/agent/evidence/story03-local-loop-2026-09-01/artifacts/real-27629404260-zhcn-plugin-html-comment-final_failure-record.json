@@ -51,7 +51,7 @@
     "error_source": "micromark-extension-mdx-jsx",
     "error_line": 29,
     "error_column": 2,
-    "codex_session": "386470d7-c2d8-4faf-aaa4-5d9cc0fbc86e",
+    "codex_session": "4eebd159-0e11-4405-ba8a-527a159bc992",
     "attempt": 1,
     "repair_attempts": 1,
     "rounds": 1,
@@ -88,7 +88,7 @@
           "offset": 641
         }
       ],
-      "instruction": "仅修复诊断 span；保持所有 must_preserve 项；不要重写整页。"
+      "instruction": "修复本轮反馈的全部 parser/checker 诊断；若前几轮已修复部分错误，继续修复剩余诊断直至页面通过严格编译；保持所有 must_preserve 项；不重写整页。"
     }
   ]
 }

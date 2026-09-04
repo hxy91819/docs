@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { checkContent } from "./checker.mjs";
 import { runFixture } from "./index.mjs";
+import { buildRepairPrompt, ROUND_INSTRUCTION } from "./action.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const FIXTURE_ROOT = path.join(ROOT, "plans/i18n-codex-mdx-fallback/agent/evidence/story01-real-fixtures-2026-09-01");
@@ -64,4 +65,24 @@ test("unimplemented auxiliary arms fail closed before Codex", async () => {
     assert.equal(result.record.codex_session, null);
     assert.equal(result.record.repair_attempts, null);
   }
+});
+
+test("relay protocol: round feedback and repair prompt carry multi-round relay wording", async () => {
+  const result = await runFixture(taxonomy, { config, variant: "taxonomy-delete-accordion" });
+  assert.ok(result.feedback.length >= 1);
+  for (const entry of result.feedback) assert.equal(entry.instruction, ROUND_INSTRUCTION);
+  const prompt = buildRepairPrompt({ file: "candidate.md", failureClass: taxonomy.failure_class, diagnostics: [{ source: "mdast-util-mdx-jsx", line: 1416, column: 339 }], reason: "Unexpected closing tag `</div>`, expected corresponding closing tag for `<span>`" });
+  assert.match(prompt, /fix all parser\/checker diagnostics reported for this round/);
+  assert.match(prompt, /continue fixing the remaining diagnostics until the page passes strict MDX compilation/);
+  assert.match(prompt, /newly reported in this round's feedback is in scope/);
+  assert.match(prompt, /must_preserve/);
+  assert.match(prompt, /do not rewrite the whole page/);
+  assert.match(prompt, /"line":1416/);
+});
+
+test("relay protocol: mock rounds feed forward current diagnostics until strict compile passes", async () => {
+  const result = await runFixture(taxonomy, { config: { ...config, maxAttempts: 4 } });
+  assert.equal(result.record.final_outcome, "success");
+  assert.equal(result.record.parser_outcome, "compile_success");
+  assert.ok(result.record.rounds >= 1 && result.record.rounds <= 4);
 });

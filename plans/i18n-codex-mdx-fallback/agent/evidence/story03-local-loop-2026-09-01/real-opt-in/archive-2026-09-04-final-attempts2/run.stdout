@@ -25,8 +25,8 @@
     {
       "fixture_id": "real-27629404260-zhcn-taxonomy-stray-close",
       "arm": "enhanced_existing_codex_action",
-      "final_outcome": "success",
-      "parser_outcome": "compile_success",
+      "final_outcome": "final_failure",
+      "parser_outcome": "compile_failure",
       "checker_result": "pass"
     }
   ]

@@ -3,7 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { checkContent, sha256 } from "./checker.mjs";
 import { PARSER, parseMdx } from "./parser.mjs";
-import { mockRepair, runRealCodex } from "./action.mjs";
+import { mockRepair, runRealCodex, buildRepairPrompt, ROUND_INSTRUCTION } from "./action.mjs";
 
 export const REQUIRED_ORDER = ["完整页面组装", "严格 @mdx-js/mdx parser/oracle 产生完整诊断", "可选辅助（none、固定版 Prettier 或 PR #153；仅在显式实验臂启用时运行）", "增强后的现有 Codex repair action（唯一 Agent 执行器）", "轻量 checker、scope 和 protected-attribute 检查；拒绝时把具体错误回传同一会话并消耗有界尝试", "外部严格 MDX recheck 与 artifact 门禁；仍失败则显式 per-file/per-shard failure"];
 const STAGE_ORDER = ["parser", "auxiliary", "codex", "checker", "scope", "protected_attribute", "recheck", "artifact"];
@@ -40,28 +40,29 @@ export async function runFixture(fixture, { arm = "enhanced_existing_codex_actio
     record.final_outcome = "final_failure"; record.status = "final_failure"; record.error = { source: "auxiliary", reason: "auxiliary_not_implemented", error_line: null, error_column: null }; record.error_source = "auxiliary"; record.error_line = null; record.error_column = null; record.skip_reason = "auxiliary_not_implemented"; return { record, candidate: source, feedback: [] };
   }
   let candidate = source; const feedback = []; const session = randomUUID(); record.codex_session = session;
+  let currentDiagnostics = parsed.diagnostics; let currentError = parsed.error;
   for (let attempt = 1; attempt <= config.maxAttempts; attempt++) {
     record.attempt = attempt; record.repair_attempts = attempt; record.rounds = attempt;
     if (config.real) {
       const scratch = path.join(ROOT, ".local/story03-scratch", fixture.id); await fs.mkdir(scratch, { recursive: true });
       await fs.writeFile(path.join(scratch, "candidate.md"), candidate);
-      const result = await runRealCodex({ file: "candidate.md", scratchDir: scratch, timeoutMs: config.hardTimeoutMs, model: config.model, reasoningEffort: config.reasoningEffort, codexHome: config.codexHome, prompt: `Repair only candidate.md using the existing OpenClaw MDX repair protocol. Preserve all content and make the smallest parser-diagnostic edit. Do not add, delete, or rename files. Failure class: ${fixture.failure_class}. Parser diagnostics: ${JSON.stringify(parsed.diagnostics)}. Parser reason: ${parsed.error?.reason ?? "unknown"}.` });
+      const result = await runRealCodex({ file: "candidate.md", scratchDir: scratch, timeoutMs: config.hardTimeoutMs, model: config.model, reasoningEffort: config.reasoningEffort, codexHome: config.codexHome, prompt: buildRepairPrompt({ file: "candidate.md", failureClass: fixture.failure_class, diagnostics: currentDiagnostics, reason: currentError?.reason ?? "unknown" }) });
       record.exit_code = result.exitCode; record.duration_ms = Date.now() - started; record.elapsed_ms = record.duration_ms; record.codex_model = config.model; record.codex_reasoning_effort = config.reasoningEffort; record.codex_stdout_tail = result.stdout.slice(-2000); record.codex_stderr_tail = result.stderr.slice(-2000);
-      if (result.timedOut || result.exitCode !== 0) { feedback.push({ round: attempt, path: fixture.path, violations: [{ gate: "parser", code: result.timedOut ? "hard_timeout" : "codex_exit", detail: (result.stderr || result.error || "codex failed").slice(0, 300) }], before_sha256: sha256(source), candidate_sha256: sha256(candidate), parser_diagnostics: parsed.diagnostics, instruction: "仅修复诊断 span；保持所有 must_preserve 项；不要重写整页。" }); continue; }
+      if (result.timedOut || result.exitCode !== 0) { feedback.push({ round: attempt, path: fixture.path, violations: [{ gate: "parser", code: result.timedOut ? "hard_timeout" : "codex_exit", detail: (result.stderr || result.error || "codex failed").slice(0, 300) }], before_sha256: sha256(source), candidate_sha256: sha256(candidate), parser_diagnostics: currentDiagnostics, instruction: ROUND_INSTRUCTION }); continue; }
       try { candidate = await fs.readFile(path.join(scratch, "candidate.md"), "utf8"); } catch { /* action may return text only; retain previous candidate */ }
     } else candidate = mockRepair({ source: candidate, failureClass: fixture.failure_class, variant });
     const checker = checkContent(source, candidate, config.checker);
     record.checker_result = checker.result; record.content_check = checker.result; record.changed_paths = candidate === source ? [] : [`docs/zh-CN/${fixture.path.replace("fixtures/zh-CN/", "")}`];
-    if (checker.result === "fail") { record.final_outcome = "checker_intercepted"; record.status = "checker_intercepted"; feedback.push({ round: attempt, path: fixture.path, violations: checker.violations.map((v) => ({ gate: "checker", ...v })), before_sha256: checker.before_sha256, candidate_sha256: checker.after_sha256, parser_diagnostics: parsed.diagnostics, instruction: "仅修复诊断 span；保持所有 must_preserve 项；不要重写整页。" }); continue; }
+    if (checker.result === "fail") { record.final_outcome = "checker_intercepted"; record.status = "checker_intercepted"; feedback.push({ round: attempt, path: fixture.path, violations: checker.violations.map((v) => ({ gate: "checker", ...v })), before_sha256: checker.before_sha256, candidate_sha256: checker.after_sha256, parser_diagnostics: currentDiagnostics, instruction: ROUND_INSTRUCTION }); continue; }
     const expectedPath = `docs/zh-CN/${fixture.path}`; const scopeOk = expectedPath === `docs/zh-CN/${fixture.path}`;
     const protectedTokens = fixture.id.includes("plugin-html")
       ? ["source_path: plugins/reference/anthropic-vertex.md", "title: Anthropic Vertex 插件", "@openclaw/anthropic-vertex-provider", "openclaw-plugin-reference:manual-start", "openclaw-plugin-reference:manual-end", "Claude Fable 5"]
       : ["title: 成熟度分类法", "<Accordion title=\"插件 - M3 Beta - 9 个领域\">", "<div className=\"maturity-category-list\">", "<Accordion title=\"安全、凭证、配对和密钥 - M3 Beta - 6 个领域\">"];
     const protectedOk = protectedTokens.every((token) => candidate.includes(token));
-    if (!scopeOk || !protectedOk) { const violation = { gate: !scopeOk ? "scope" : "protected_attribute", code: !scopeOk ? "path_out_of_scope" : "protected_token_changed", detail: "candidate failed external gate" }; record.final_outcome = "final_failure"; record.status = "final_failure"; feedback.push({ round: attempt, path: fixture.path, violations: [violation], before_sha256: sha256(source), candidate_sha256: sha256(candidate), parser_diagnostics: parsed.diagnostics, instruction: "仅修复诊断 span；保持所有 must_preserve 项；不要重写整页。" }); continue; }
-    const recheck = await parseMdx(candidate); record.parser_outcome = recheck.outcome; record.parser_diagnostics = recheck.diagnostics; record.error = recheck.error; record.error_source = recheck.error?.source ?? null; record.error_line = recheck.error?.error_line ?? null; record.error_column = recheck.error?.error_column ?? null;
+    if (!scopeOk || !protectedOk) { const violation = { gate: !scopeOk ? "scope" : "protected_attribute", code: !scopeOk ? "path_out_of_scope" : "protected_token_changed", detail: "candidate failed external gate" }; record.final_outcome = "final_failure"; record.status = "final_failure"; feedback.push({ round: attempt, path: fixture.path, violations: [violation], before_sha256: sha256(source), candidate_sha256: sha256(candidate), parser_diagnostics: currentDiagnostics, instruction: ROUND_INSTRUCTION }); continue; }
+    const recheck = await parseMdx(candidate); currentDiagnostics = recheck.diagnostics; currentError = recheck.error; record.parser_outcome = recheck.outcome; record.parser_diagnostics = recheck.diagnostics; record.error = recheck.error; record.error_source = recheck.error?.source ?? null; record.error_line = recheck.error?.error_line ?? null; record.error_column = recheck.error?.error_column ?? null;
     if (recheck.outcome === "compile_success") { record.final_outcome = "success"; record.status = "success"; record.exit_code = 0; break; }
-    record.final_outcome = "final_failure"; record.status = "final_failure"; feedback.push({ round: attempt, path: fixture.path, violations: [{ gate: "parser", code: "compile_failure", detail: recheck.error?.reason }], before_sha256: sha256(source), candidate_sha256: sha256(candidate), parser_diagnostics: recheck.diagnostics, instruction: "仅修复诊断 span；保持所有 must_preserve 项；不要重写整页。" });
+    record.final_outcome = "final_failure"; record.status = "final_failure"; feedback.push({ round: attempt, path: fixture.path, violations: [{ gate: "parser", code: "compile_failure", detail: recheck.error?.reason }], before_sha256: sha256(source), candidate_sha256: sha256(candidate), parser_diagnostics: currentDiagnostics, instruction: ROUND_INSTRUCTION });
   }
   if (record.final_outcome === "checker_intercepted" && feedback.length >= config.maxAttempts && !preserveCheckerInterception) record.final_outcome = record.status = "final_failure";
   if (record.final_outcome === "not_run" && (record.attempt ?? 0) >= config.maxAttempts) record.final_outcome = record.status = "final_failure";
@@ -93,8 +94,13 @@ async function main() {
     records.push(failureCase.record);
     await fs.writeFile(path.join(evidence, "artifacts", `${failureCase.record.fixture_id}-final_failure-record.json`), JSON.stringify({ fixture_id: failureCase.record.fixture_id, payload: failureCase.candidate, metadata: failureCase.record, feedback: failureCase.feedback }, null, 2));
   }
-  await fs.writeFile(path.join(evidence, "experiment.ndjson"), records.map((r) => JSON.stringify(r)).join("\n") + "\n");
-  await fs.writeFile(path.join(evidence, "commands.json"), JSON.stringify({ command: "node tools/mdx-fallback-lab/index.mjs", environment: { HARD_TIMEOUT_MS: cfg.hardTimeoutMs, MAX_ATTEMPTS: cfg.maxAttempts, AUXILIARY_MODE: cfg.auxiliaryMode, MDX_LAB_REAL_CODEX: cfg.real ? "1" : "0", MDX_LAB_MODEL: cfg.model, MDX_LAB_EFFORT: cfg.reasoningEffort, MDX_LAB_CODEX_HOME: cfg.codexHome }, required_order: REQUIRED_ORDER, stage_order: STAGE_ORDER }, null, 2));
+  const ndjsonPath = path.join(evidence, "experiment.ndjson");
+  let ndjsonRecords = records;
+  if (process.env.MDX_LAB_APPEND === "1") {
+    try { ndjsonRecords = [...(await fs.readFile(ndjsonPath, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line)), ...records]; } catch { ndjsonRecords = records; }
+  }
+  await fs.writeFile(ndjsonPath, ndjsonRecords.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  await fs.writeFile(path.join(evidence, "commands.json"), JSON.stringify({ command: "node tools/mdx-fallback-lab/index.mjs", environment: { HARD_TIMEOUT_MS: cfg.hardTimeoutMs, MAX_ATTEMPTS: cfg.maxAttempts, AUXILIARY_MODE: cfg.auxiliaryMode, MDX_LAB_REAL_CODEX: cfg.real ? "1" : "0", MDX_LAB_MODEL: cfg.model, MDX_LAB_EFFORT: cfg.reasoningEffort, MDX_LAB_CODEX_HOME: cfg.codexHome, MDX_LAB_APPEND: process.env.MDX_LAB_APPEND === "1" ? "1" : "0" }, required_order: REQUIRED_ORDER, stage_order: STAGE_ORDER }, null, 2));
   console.log(JSON.stringify({ evidence, records: records.map((r) => ({ fixture_id: r.fixture_id, arm: r.arm, final_outcome: r.final_outcome, parser_outcome: r.parser_outcome, checker_result: r.checker_result })) }, null, 2));
 }
 
