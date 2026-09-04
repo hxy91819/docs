@@ -71,6 +71,17 @@ on:
         default: false
         type: boolean
 
+# D-09 budget for the bounded Codex MDX repair relay (single entry:
+# openai/codex-action@v1). Both relay budgets are explicit overrides with
+# these approved defaults; mdx_repair_relay.py fails closed on invalid values.
+env:
+  MDX_REPAIR_MAX_ATTEMPTS: "4"
+  MDX_REPAIR_HARD_TIMEOUT_MS: "600000"
+  # Auxiliary repair arms stay out of production (D-09: fail-closed);
+  # mdx_repair_relay.py aborts the relay if MDX_REPAIR_AUXILIARY_MODE is set
+  # to anything besides none.
+  MDX_REPAIR_AUXILIARY_MODE: "none"
+
 jobs:
   translate:
     name: Translate ${{ inputs.locale }} shard ${{ inputs.shard_index }}/${{ inputs.shard_total }}
@@ -260,7 +271,24 @@ jobs:
         run: |
           mkdir -p .openclaw-sync/mdx
           node .openclaw-sync/check-docs-mdx.mjs "docs/${LOCALE}" \
-            --json-out ".openclaw-sync/mdx/${LOCALE}.json"
+            --json-out ".openclaw-sync/mdx/${LOCALE}.json" \
+            --max-errors 500
+
+      # Contract startup conditions (plans/i18n-codex-mdx-fallback §1): the
+      # single repair action only starts on complete pages when the strict
+      # check failed, the pending manifest is non-empty, and compile
+      # diagnostics exist inside docs/<locale>. Otherwise not_run is recorded.
+      - name: Decide MDX repair relay
+        id: mdx_relay
+        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure'
+        env:
+          LOCALE: ${{ inputs.locale }}
+          LOCALE_SLUG: ${{ inputs.locale_slug }}
+          SHARD_INDEX: ${{ inputs.shard_index }}
+          SHARD_TOTAL: ${{ inputs.shard_total }}
+          MDX_CHECK_OUTCOME: ${{ steps.mdx_check.outcome }}
+        run: |
+          python "${I18N_SCRIPT_DIR}/mdx_repair_relay.py" decide
 
       - name: Snapshot translated MDX repair scope
         if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure'
@@ -270,13 +298,19 @@ jobs:
           python "${I18N_SCRIPT_DIR}/mdx_repair_scope.py" snapshot \
             --baseline "${RUNNER_TEMP}/${LOCALE}.repair-baseline.txt"
 
+      # Relay round 1 of at most MDX_REPAIR_MAX_ATTEMPTS (D-09). The action
+      # reads the current diagnostics file; every later round is fed the
+      # previous round's recheck diagnostics through the same file.
       - name: Repair translated MDX
         id: mdx_repair
-        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure'
+        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' && env.MDX_REPAIR_MAX_ATTEMPTS >= 1
         continue-on-error: true
+        # Per-round hard budget: HARD_TIMEOUT_MS (default 600000) plus runner margin.
+        timeout-minutes: 12
         uses: openai/codex-action@v1
         env:
           LOCALE: ${{ inputs.locale }}
+          MDX_REPAIR_ROUND: "1"
         with:
           openai-api-key: ${{ secrets.OPENCLAW_DOCS_AGENT_OPENAI_API_KEY || secrets.OPENCLAW_DOCS_I18N_OPENAI_API_KEY }}
           prompt-file: .openclaw-sync/docs-mdx-repair.md
@@ -288,7 +322,7 @@ jobs:
 
       - name: Enforce translated MDX repair scope
         id: mdx_scope
-        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure'
+        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run'
         continue-on-error: true
         env:
           LOCALE: ${{ inputs.locale }}
@@ -303,8 +337,205 @@ jobs:
         env:
           LOCALE: ${{ inputs.locale }}
         run: |
+          set +e
           node .openclaw-sync/check-docs-mdx.mjs "docs/${LOCALE}" \
-            --json-out ".openclaw-sync/mdx/${LOCALE}.json"
+            --json-out ".openclaw-sync/mdx/${LOCALE}.json" \
+            --max-errors 500
+          recheck_status=$?
+          cp ".openclaw-sync/mdx/${LOCALE}.json" ".openclaw-sync/mdx/${LOCALE}-round-1.json"
+          exit "$recheck_status"
+
+      # Relay rounds 2..MDX_REPAIR_MAX_ATTEMPTS: each round only starts when
+      # the previous round's recheck still failed, so the diagnostics file the
+      # action reads always carries that round's fed-back diagnostics. Every
+      # round stays inside the same single repair entry and its gates.
+      - name: Repair translated MDX (relay round 2)
+        id: mdx_repair_2
+        if: >-
+          steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 2 && steps.mdx_repair.outcome == 'success' &&
+          steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: 12
+        uses: openai/codex-action@v1
+        env:
+          LOCALE: ${{ inputs.locale }}
+          MDX_REPAIR_ROUND: "2"
+        with:
+          openai-api-key: ${{ secrets.OPENCLAW_DOCS_AGENT_OPENAI_API_KEY || secrets.OPENCLAW_DOCS_I18N_OPENAI_API_KEY }}
+          prompt-file: .openclaw-sync/docs-mdx-repair.md
+          model: gpt-5.6
+          effort: xhigh
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
+          codex-args: '["--full-auto"]'
+
+      - name: Enforce translated MDX repair scope (relay round 2)
+        id: mdx_scope_2
+        if: >-
+          steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 2 && steps.mdx_repair.outcome == 'success' &&
+          steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure' &&
+          steps.mdx_repair_2.outcome == 'success'
+        continue-on-error: true
+        env:
+          LOCALE: ${{ inputs.locale }}
+        run: |
+          python "${I18N_SCRIPT_DIR}/mdx_repair_scope.py" enforce \
+            --baseline "${RUNNER_TEMP}/${LOCALE}.repair-baseline.txt"
+
+      - name: Recheck translated MDX (relay round 2)
+        id: mdx_recheck_2
+        if: >-
+          steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 2 && steps.mdx_repair.outcome == 'success' &&
+          steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure' &&
+          steps.mdx_repair_2.outcome == 'success' && steps.mdx_scope_2.outcome == 'success'
+        continue-on-error: true
+        env:
+          LOCALE: ${{ inputs.locale }}
+        run: |
+          set +e
+          node .openclaw-sync/check-docs-mdx.mjs "docs/${LOCALE}" \
+            --json-out ".openclaw-sync/mdx/${LOCALE}.json" \
+            --max-errors 500
+          recheck_status=$?
+          cp ".openclaw-sync/mdx/${LOCALE}.json" ".openclaw-sync/mdx/${LOCALE}-round-2.json"
+          exit "$recheck_status"
+
+      - name: Repair translated MDX (relay round 3)
+        id: mdx_repair_3
+        if: >-
+          steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 3 && steps.mdx_repair_2.outcome == 'success' &&
+          steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: 12
+        uses: openai/codex-action@v1
+        env:
+          LOCALE: ${{ inputs.locale }}
+          MDX_REPAIR_ROUND: "3"
+        with:
+          openai-api-key: ${{ secrets.OPENCLAW_DOCS_AGENT_OPENAI_API_KEY || secrets.OPENCLAW_DOCS_I18N_OPENAI_API_KEY }}
+          prompt-file: .openclaw-sync/docs-mdx-repair.md
+          model: gpt-5.6
+          effort: xhigh
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
+          codex-args: '["--full-auto"]'
+
+      - name: Enforce translated MDX repair scope (relay round 3)
+        id: mdx_scope_3
+        if: >-
+          steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 3 && steps.mdx_repair_2.outcome == 'success' &&
+          steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure' &&
+          steps.mdx_repair_3.outcome == 'success'
+        continue-on-error: true
+        env:
+          LOCALE: ${{ inputs.locale }}
+        run: |
+          python "${I18N_SCRIPT_DIR}/mdx_repair_scope.py" enforce \
+            --baseline "${RUNNER_TEMP}/${LOCALE}.repair-baseline.txt"
+
+      - name: Recheck translated MDX (relay round 3)
+        id: mdx_recheck_3
+        if: >-
+          steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 3 && steps.mdx_repair_2.outcome == 'success' &&
+          steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure' &&
+          steps.mdx_repair_3.outcome == 'success' && steps.mdx_scope_3.outcome == 'success'
+        continue-on-error: true
+        env:
+          LOCALE: ${{ inputs.locale }}
+        run: |
+          set +e
+          node .openclaw-sync/check-docs-mdx.mjs "docs/${LOCALE}" \
+            --json-out ".openclaw-sync/mdx/${LOCALE}.json" \
+            --max-errors 500
+          recheck_status=$?
+          cp ".openclaw-sync/mdx/${LOCALE}.json" ".openclaw-sync/mdx/${LOCALE}-round-3.json"
+          exit "$recheck_status"
+
+      - name: Repair translated MDX (relay round 4)
+        id: mdx_repair_4
+        if: >-
+          steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 4 && steps.mdx_repair_3.outcome == 'success' &&
+          steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: 12
+        uses: openai/codex-action@v1
+        env:
+          LOCALE: ${{ inputs.locale }}
+          MDX_REPAIR_ROUND: "4"
+        with:
+          openai-api-key: ${{ secrets.OPENCLAW_DOCS_AGENT_OPENAI_API_KEY || secrets.OPENCLAW_DOCS_I18N_OPENAI_API_KEY }}
+          prompt-file: .openclaw-sync/docs-mdx-repair.md
+          model: gpt-5.6
+          effort: xhigh
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
+          codex-args: '["--full-auto"]'
+
+      - name: Enforce translated MDX repair scope (relay round 4)
+        id: mdx_scope_4
+        if: >-
+          steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 4 && steps.mdx_repair_3.outcome == 'success' &&
+          steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure' &&
+          steps.mdx_repair_4.outcome == 'success'
+        continue-on-error: true
+        env:
+          LOCALE: ${{ inputs.locale }}
+        run: |
+          python "${I18N_SCRIPT_DIR}/mdx_repair_scope.py" enforce \
+            --baseline "${RUNNER_TEMP}/${LOCALE}.repair-baseline.txt"
+
+      - name: Recheck translated MDX (relay round 4)
+        id: mdx_recheck_4
+        if: >-
+          steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' &&
+          steps.mdx_check.outcome == 'failure' && steps.mdx_relay.outputs.decision == 'run' &&
+          env.MDX_REPAIR_MAX_ATTEMPTS >= 4 && steps.mdx_repair_3.outcome == 'success' &&
+          steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure' &&
+          steps.mdx_repair_4.outcome == 'success' && steps.mdx_scope_4.outcome == 'success'
+        continue-on-error: true
+        env:
+          LOCALE: ${{ inputs.locale }}
+        run: |
+          set +e
+          node .openclaw-sync/check-docs-mdx.mjs "docs/${LOCALE}" \
+            --json-out ".openclaw-sync/mdx/${LOCALE}.json" \
+            --max-errors 500
+          recheck_status=$?
+          cp ".openclaw-sync/mdx/${LOCALE}.json" ".openclaw-sync/mdx/${LOCALE}-round-4.json"
+          exit "$recheck_status"
+
+      # Classifies the relay outcome for artifact metadata and partial-success
+      # protection (AC-05): per-page failures stay explicitly marked while the
+      # shard's passing pages are packaged normally.
+      - name: Record MDX repair relay outcome
+        id: mdx_repair_report
+        if: steps.stale.outputs.skip != 'true' && steps.translate_docs.outcome == 'success' && steps.mdx_check.outcome == 'failure'
+        env:
+          LOCALE: ${{ inputs.locale }}
+          LOCALE_SLUG: ${{ inputs.locale_slug }}
+          SHARD_INDEX: ${{ inputs.shard_index }}
+          SHARD_TOTAL: ${{ inputs.shard_total }}
+          MDX_CHECK_OUTCOME: ${{ steps.mdx_check.outcome }}
+          # Three outcome tokens per relay round: action scope recheck.
+          MDX_REPAIR_ROUNDS_OUTCOMES: "${{ steps.mdx_repair.outcome || 'skipped' }} ${{ steps.mdx_scope.outcome || 'skipped' }} ${{ steps.mdx_recheck.outcome || 'skipped' }} ${{ steps.mdx_repair_2.outcome || 'skipped' }} ${{ steps.mdx_scope_2.outcome || 'skipped' }} ${{ steps.mdx_recheck_2.outcome || 'skipped' }} ${{ steps.mdx_repair_3.outcome || 'skipped' }} ${{ steps.mdx_scope_3.outcome || 'skipped' }} ${{ steps.mdx_recheck_3.outcome || 'skipped' }} ${{ steps.mdx_repair_4.outcome || 'skipped' }} ${{ steps.mdx_scope_4.outcome || 'skipped' }} ${{ steps.mdx_recheck_4.outcome || 'skipped' }}"
+        run: |
+          python "${I18N_SCRIPT_DIR}/mdx_repair_relay.py" report
 
       - name: Prepare locale artifact
         id: package
@@ -325,7 +556,14 @@ jobs:
           MDX_CHECK_OUTCOME: ${{ steps.mdx_check.outcome || 'skipped' }}
           MDX_REPAIR_OUTCOME: ${{ steps.mdx_repair.outcome || 'skipped' }}
           MDX_SCOPE_OUTCOME: ${{ steps.mdx_scope.outcome || 'skipped' }}
-          MDX_RECHECK_OUTCOME: ${{ steps.mdx_recheck.outcome || 'skipped' }}
+          MDX_RECHECK_OUTCOME: ${{ steps.mdx_repair_report.outputs.recheck_outcome || steps.mdx_recheck.outcome || 'skipped' }}
+          MDX_REPAIR_FINAL_OUTCOME: ${{ steps.mdx_repair_report.outputs.final_outcome || 'not_run' }}
+          MDX_REPAIR_FAILURE_KIND: ${{ steps.mdx_repair_report.outputs.failure_kind || 'none' }}
+          MDX_REPAIR_MODE: ${{ steps.mdx_repair_report.outputs.repair_mode || 'none' }}
+          MDX_REPAIR_ROUNDS: ${{ steps.mdx_repair_report.outputs.rounds || '0' }}
+          MDX_REPAIR_FAILED_PATHS: ${{ steps.mdx_repair_report.outputs.failed_paths || '' }}
+          MDX_REPAIR_NONSYNTAX_FAILED_PATHS: ${{ steps.mdx_repair_report.outputs.nonsyntax_failed_paths || '' }}
+          MDX_REPAIR_CHANGED_PATHS: ${{ steps.mdx_repair_report.outputs.changed_paths || '' }}
           ARTIFACT_ROLE: ${{ inputs.artifact_role }}
         run: |
           set -euo pipefail

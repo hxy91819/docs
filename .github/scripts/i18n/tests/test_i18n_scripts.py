@@ -41,6 +41,7 @@ pending = load_module("build_pending_manifest")
 clear_pending_locale_outputs = load_module("clear_pending_locale_outputs")
 package_artifact = load_module("package_artifact")
 mdx_repair_scope = load_module("mdx_repair_scope")
+mdx_repair_relay = load_module("mdx_repair_relay")
 apply_artifacts = load_module("apply_artifacts")
 merge_artifact_roots = load_module("merge_artifact_roots")
 read_source_metadata = load_module("read_source_metadata")
@@ -146,6 +147,7 @@ class I18NScriptTests(unittest.TestCase):
         ).stdout.splitlines()
         changed_paths = changed + untracked
         allowed_docs_paths = {"docs/.i18n/translation-workflow.md", "docs/.i18n/translation-ci-temporary-todo.md"}
+        allowed_openclaw_sync_paths = {".openclaw-sync/docs-mdx-repair.md"}
         generated_docs = [
             path
             for path in changed_paths
@@ -153,6 +155,7 @@ class I18NScriptTests(unittest.TestCase):
             or path == "docs/docs.json"
             or (
                 path.startswith(".openclaw-sync/")
+                and path not in allowed_openclaw_sync_paths
                 and not path.startswith(".openclaw-sync/workflow-shell-check/")
             )
         ]
@@ -436,7 +439,7 @@ class I18NScriptTests(unittest.TestCase):
         full = (REPO_ROOT / ".github/workflows/translate-all.yml").read_text(encoding="utf-8")
         incremental = (REPO_ROOT / ".github/workflows/translate-incremental.yml").read_text(encoding="utf-8")
 
-        self.assertIn("npm install -g @openai/codex@0.146.0", reusable)
+        self.assertIn("npm install -g @openai/codex@0.146.1", reusable)
         self.assertIn("effort: xhigh", reusable)
         self.assertNotIn("effort: max", reusable)
         self.assertEqual(1, full.count('thinking_effort: "xhigh"'))
@@ -2641,11 +2644,6 @@ class I18NScriptTests(unittest.TestCase):
                 mdx_repair_scope.enforce_scope(repo, "fr", baseline)
             (repo / "docs/index.md").write_text("# Index\n", encoding="utf-8")
 
-            (repo / "docs/index.md").write_text("# Staged source side effect\n", encoding="utf-8")
-            run_git(repo, "add", "docs/index.md")
-            with self.assertRaises(SystemExit):
-                mdx_repair_scope.enforce_scope(repo, "fr", baseline)
-            run_git(repo, "restore", "--staged", "docs/index.md")
             (repo / "docs/index.md").write_text("# Index\n", encoding="utf-8")
 
             (repo / "docs/fr/from-repair.md").write_text("# Repair side effect\n", encoding="utf-8")
@@ -2658,6 +2656,591 @@ class I18NScriptTests(unittest.TestCase):
             run_git(repo, "add", "docs/fr/staged-from-repair.md")
             with self.assertRaises(SystemExit):
                 mdx_repair_scope.enforce_scope(repo, "fr", baseline)
+
+            # Staged non-locale side effects are forbidden too. This stays
+            # last so the suite never has to unstage the shared index.
+            (repo / "docs/index.md").write_text("# Staged source side effect\n", encoding="utf-8")
+            run_git(repo, "add", "docs/index.md")
+            with self.assertRaises(SystemExit):
+                mdx_repair_scope.enforce_scope(repo, "fr", baseline)
+
+    def _relay_reusable_workflow_text(self) -> str:
+        return (REPO_ROOT / ".github/workflows/translate-locale-reusable.yml").read_text(encoding="utf-8")
+
+    def test_reusable_workflow_keeps_single_entry_bounded_relay(self) -> None:
+        text = self._relay_reusable_workflow_text()
+
+        # D-09 budgets are explicit workflow env with the approved defaults.
+        self.assertIn('MDX_REPAIR_MAX_ATTEMPTS: "4"', text)
+        self.assertIn('MDX_REPAIR_HARD_TIMEOUT_MS: "600000"', text)
+        self.assertIn('MDX_REPAIR_AUXILIARY_MODE: "none"', text)
+
+        # Exactly one Agent entry, unrolled into at most MAX_ATTEMPTS rounds;
+        # no other Codex executor and no auxiliary arm exists in production.
+        self.assertEqual(4, text.count("uses: openai/codex-action@v1"))
+        self.assertEqual(4, text.count("timeout-minutes: 12\n"))
+        self.assertEqual(4, text.count("prompt-file: .openclaw-sync/docs-mdx-repair.md"))
+        self.assertNotIn("codex exec", text)
+        self.assertNotIn("prettier", text)
+        self.assertNotIn("pr153", text)
+
+        # Contract stage order: strict check -> relay decision -> scope
+        # snapshot -> per-round (repair -> enforce scope -> recheck) -> report
+        # -> artifact packaging.
+        order = [
+            "Check translated MDX",
+            "Decide MDX repair relay",
+            "Snapshot translated MDX repair scope",
+            "Repair translated MDX\n",
+            "Enforce translated MDX repair scope\n",
+            "Recheck translated MDX\n",
+            "Repair translated MDX (relay round 2)",
+            "Enforce translated MDX repair scope (relay round 2)",
+            "Recheck translated MDX (relay round 2)",
+            "Repair translated MDX (relay round 3)",
+            "Enforce translated MDX repair scope (relay round 3)",
+            "Recheck translated MDX (relay round 3)",
+            "Repair translated MDX (relay round 4)",
+            "Enforce translated MDX repair scope (relay round 4)",
+            "Recheck translated MDX (relay round 4)",
+            "Record MDX repair relay outcome",
+            "Prepare locale artifact",
+        ]
+        positions = [text.index(name) for name in order]
+        self.assertEqual(sorted(positions), positions)
+
+        # Relay stop conditions: round N+1 only runs when round N's recheck
+        # still failed, so retries are bounded and diagnostics stay current.
+        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 1", text)
+        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 2", text)
+        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 3", text)
+        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 4", text)
+        self.assertIn("steps.mdx_repair.outcome == 'success' &&\n          steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure'", text)
+        self.assertIn("steps.mdx_repair_2.outcome == 'success' &&\n          steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure'", text)
+        self.assertIn("steps.mdx_repair_3.outcome == 'success' &&\n          steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure'", text)
+
+        # Every relay round keeps the scope and strict recheck gates; the
+        # scope baseline is snapshotted once before the first repair round.
+        self.assertEqual(4, text.count('mdx_repair_scope.py" enforce'))
+        self.assertEqual(1, text.count('mdx_repair_scope.py" snapshot'))
+        self.assertEqual(5, text.count("check-docs-mdx.mjs"))
+        self.assertIn('python "${I18N_SCRIPT_DIR}/mdx_repair_relay.py" decide', text)
+        self.assertIn('python "${I18N_SCRIPT_DIR}/mdx_repair_relay.py" report', text)
+
+    def test_docs_mdx_repair_prompt_carries_relay_protocol(self) -> None:
+        prompt_file = REPO_ROOT / ".openclaw-sync/docs-mdx-repair.md"
+        prompt = " ".join(prompt_file.read_text(encoding="utf-8").split())
+
+        self.assertIn("multi-round relay protocol", prompt)
+        self.assertIn("fix all parser/checker diagnostics reported for this round", prompt)
+        self.assertIn("continue fixing the remaining diagnostics", prompt)
+        self.assertIn("until the pages pass strict MDX", prompt)
+        self.assertIn("must_preserve", prompt)
+        self.assertIn("Do not rewrite the whole page", prompt)
+        self.assertIn("Do not add, delete, or rename files", prompt)
+        self.assertIn(".openclaw-sync/mdx/${LOCALE}.json", prompt)
+        self.assertIn("MDX_REPAIR_MAX_ATTEMPTS", prompt)
+        self.assertIn("complete pages", prompt)
+
+    def _relay_decide_workspace(self, repo: Path, errors: list[dict], manifest_lines: list[str]) -> None:
+        mdx_dir = repo / ".openclaw-sync/mdx"
+        mdx_dir.mkdir(parents=True, exist_ok=True)
+        (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text("\n".join(manifest_lines) + ("\n" if manifest_lines else ""), encoding="utf-8")
+        (mdx_dir / "fr.json").write_text(json.dumps({"files": 1, "errors": errors}), encoding="utf-8")
+
+    def test_repair_relay_decide_runs_on_strict_compile_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            source = repo / "docs/index.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("# Index\n", encoding="utf-8")
+            (repo / "docs/fr").mkdir()
+            (repo / "docs/fr/index.md").write_text("# Index FR\n", encoding="utf-8")
+            self._relay_decide_workspace(
+                repo,
+                [{"type": "mdx", "file": "docs/fr/index.md", "line": 1, "column": 1, "message": "Unexpected end of file"}],
+                [str(source)],
+            )
+            output = repo / "github-output.txt"
+            relay_env = {
+                "GITHUB_WORKSPACE": str(repo),
+                "GITHUB_OUTPUT": str(output),
+                "RUNNER_TEMP": str(repo / ".openclaw-sync/mdx"),
+                "LOCALE": "fr",
+                "LOCALE_SLUG": "fr",
+                "SHARD_INDEX": "0",
+                "SHARD_TOTAL": "1",
+                "MDX_CHECK_OUTCOME": "failure",
+                "MDX_REPAIR_MAX_ATTEMPTS": "4",
+                "MDX_REPAIR_HARD_TIMEOUT_MS": "600000",
+            }
+
+            with chdir(repo), env(relay_env):
+                mdx_repair_relay.decide(repo)
+
+            self.assertIn("decision=run", output.read_text(encoding="utf-8"))
+            state = json.loads((repo / ".openclaw-sync/mdx/fr-repair-state.json").read_text(encoding="utf-8"))
+            self.assertEqual("run", state["decision"])
+            self.assertEqual("relay", state["repair_mode"])
+            self.assertEqual(4, state["max_attempts"])
+            self.assertEqual(600000, state["hard_timeout_ms"])
+            self.assertEqual("none", state["auxiliary_mode"])
+            snapshot = json.loads(
+                (repo / ".openclaw-sync/mdx/fr.repair-content-snapshot.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(["docs/fr/index.md"], sorted(snapshot))
+
+    def test_repair_relay_decide_records_not_run_for_startup_conditions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            source = repo / "docs/index.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("# Index\n", encoding="utf-8")
+            output = repo / "github-output.txt"
+            base_env = {
+                "GITHUB_WORKSPACE": str(repo),
+                "GITHUB_OUTPUT": str(output),
+                "RUNNER_TEMP": str(repo / ".openclaw-sync/mdx"),
+                "LOCALE": "fr",
+                "LOCALE_SLUG": "fr",
+                "SHARD_INDEX": "0",
+                "SHARD_TOTAL": "1",
+                "MDX_CHECK_OUTCOME": "failure",
+                "MDX_REPAIR_MAX_ATTEMPTS": "4",
+                "MDX_REPAIR_HARD_TIMEOUT_MS": "600000",
+            }
+            compile_error = {"type": "mdx", "file": "docs/fr/index.md", "line": 1, "column": 1, "message": "boom"}
+
+            def decide_with(errors: list[dict], manifest_lines: list[str], check_outcome: str = "failure") -> str:
+                output.write_text("", encoding="utf-8")
+                self._relay_decide_workspace(repo, errors, manifest_lines)
+                with chdir(repo), env({**base_env, "MDX_CHECK_OUTCOME": check_outcome}):
+                    mdx_repair_relay.decide(repo)
+                return output.read_text(encoding="utf-8")
+
+            # Strict check passed: the repair must not start.
+            self.assertIn("decision=not_run", decide_with([compile_error], [str(source)], check_outcome="success"))
+            self.assertIn("reason=mdx_check_success", output.read_text(encoding="utf-8"))
+
+            # No pending files: not_run success branch.
+            self.assertIn("decision=not_run", decide_with([compile_error], []))
+            self.assertIn("reason=no_pending_files", output.read_text(encoding="utf-8"))
+
+            # Only non-compile diagnostics (e.g. poison text): not repaired.
+            poison = {"type": "poison-text", "file": "docs/fr/index.md", "line": 1, "column": 1, "message": "leak"}
+            self.assertIn("decision=not_run", decide_with([poison], [str(source)]))
+            self.assertIn("reason=no_mdx_compile_diagnostics", output.read_text(encoding="utf-8"))
+
+            # Diagnostics outside the locale scope: not repaired.
+            outside = {"type": "mdx", "file": "docs/en/index.md", "line": 1, "column": 1, "message": "boom"}
+            self.assertIn("decision=not_run", decide_with([outside], [str(source)]))
+            self.assertIn("reason=diagnostics_out_of_locale_scope", output.read_text(encoding="utf-8"))
+
+            state = json.loads((repo / ".openclaw-sync/mdx/fr-repair-state.json").read_text(encoding="utf-8"))
+            self.assertEqual("none", state["repair_mode"])
+            self.assertFalse((repo / ".openclaw-sync/mdx/fr.repair-content-snapshot.json").exists())
+
+    def test_repair_relay_decide_fails_closed_on_invalid_budget_or_auxiliary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            source = repo / "docs/index.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("# Index\n", encoding="utf-8")
+            self._relay_decide_workspace(
+                repo,
+                [{"type": "mdx", "file": "docs/fr/index.md", "line": 1, "column": 1, "message": "boom"}],
+                [str(source)],
+            )
+            base_env = {
+                "GITHUB_WORKSPACE": str(repo),
+                "LOCALE": "fr",
+                "LOCALE_SLUG": "fr",
+                "SHARD_INDEX": "0",
+                "SHARD_TOTAL": "1",
+                "MDX_CHECK_OUTCOME": "failure",
+                "MDX_REPAIR_MAX_ATTEMPTS": "4",
+                "MDX_REPAIR_HARD_TIMEOUT_MS": "600000",
+            }
+            with chdir(repo):
+                with env({**base_env, "MDX_REPAIR_MAX_ATTEMPTS": "0"}), self.assertRaisesRegex(SystemExit, "MDX_REPAIR_MAX_ATTEMPTS"):
+                    mdx_repair_relay.decide(repo)
+                with env({**base_env, "MDX_REPAIR_HARD_TIMEOUT_MS": "unlimited"}), self.assertRaisesRegex(SystemExit, "MDX_REPAIR_HARD_TIMEOUT_MS"):
+                    mdx_repair_relay.decide(repo)
+                with env({**base_env, "MDX_REPAIR_AUXILIARY_MODE": "prettier"}), self.assertRaisesRegex(SystemExit, "not enabled in production"):
+                    mdx_repair_relay.decide(repo)
+
+    def _relay_report_workspace(self, repo: Path, errors: list[dict], snapshot: dict[str, str], decision: str = "run") -> None:
+        mdx_dir = repo / ".openclaw-sync/mdx"
+        mdx_dir.mkdir(parents=True, exist_ok=True)
+        (mdx_dir / "fr.json").write_text(json.dumps({"files": 3, "errors": errors}), encoding="utf-8")
+        (mdx_dir / "fr-repair-state.json").write_text(
+            json.dumps(
+                {
+                    "decision": decision,
+                    "not_run_reason": "" if decision == "run" else "no_pending_files",
+                    "locale": "fr",
+                    "locale_slug": "fr",
+                    "shard_index": "0",
+                    "shard_total": "1",
+                    "repair_mode": "relay" if decision == "run" else "none",
+                    "max_attempts": 4,
+                    "hard_timeout_ms": 600000,
+                    "auxiliary_mode": "none",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (mdx_dir / "fr.repair-content-snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    def test_repair_relay_report_classifies_relay_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            docs = repo / "docs"
+            (docs / "fr").mkdir(parents=True)
+            (docs / "index.md").write_text("# Index\n", encoding="utf-8")
+            (docs / "guide.md").write_text("# Guide\n", encoding="utf-8")
+            (docs / "fr/index.md").write_text("# Index FR casse\n", encoding="utf-8")
+            (docs / "fr/guide.md").write_text("# Guide FR\n", encoding="utf-8")
+            (docs / "fr/poison.md").write_text("# Poison FR\n", encoding="utf-8")
+            manifest_lines = [str(docs / name) for name in ("index.md", "guide.md", "poison.md")]
+            (repo / ".openclaw-sync").mkdir(exist_ok=True)
+            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
+            guide_hash = hashlib.sha256((docs / "fr/guide.md").read_bytes()).hexdigest()
+            poison_hash = hashlib.sha256((docs / "fr/poison.md").read_bytes()).hexdigest()
+            output = repo / "github-output.txt"
+            base_env = {
+                "GITHUB_WORKSPACE": str(repo),
+                "GITHUB_OUTPUT": str(output),
+                "RUNNER_TEMP": str(repo / ".openclaw-sync/mdx"),
+                "LOCALE": "fr",
+                "LOCALE_SLUG": "fr",
+                "SHARD_INDEX": "0",
+                "SHARD_TOTAL": "1",
+                "MDX_CHECK_OUTCOME": "failure",
+                "MDX_REPAIR_MAX_ATTEMPTS": "4",
+                "MDX_REPAIR_HARD_TIMEOUT_MS": "600000",
+            }
+            compile_error = {"type": "mdx", "file": "docs/fr/index.md", "line": 3, "column": 1, "message": "Unexpected end of file"}
+            poison_error = {"type": "poison-text", "file": "docs/fr/poison.md", "line": 1, "column": 1, "message": "Leaked tool-call channel marker."}
+
+            def report_with(errors: list[dict], snapshot: dict[str, str], outcomes: str, decision: str = "run") -> dict[str, object]:
+                output.write_text("", encoding="utf-8")
+                self._relay_report_workspace(repo, errors, snapshot, decision)
+                with chdir(repo), env({**base_env, "MDX_REPAIR_ROUNDS_OUTCOMES": outcomes}):
+                    mdx_repair_relay.report(repo)
+                lines = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines() if "=" in line)
+                self.assertEqual("not_run" if decision != "run" else lines["final_outcome"], lines["final_outcome"])
+                return {**lines, "report": json.loads((repo / ".openclaw-sync/mdx/fr-repair-report.json").read_text(encoding="utf-8"))}
+
+            snapshot = {
+                "docs/fr/index.md": "stale-content-hash",
+                "docs/fr/guide.md": guide_hash,
+                "docs/fr/poison.md": poison_hash,
+            }
+            # Partial success: one page still failing, one pending page passing.
+            result = report_with(
+                [compile_error, poison_error],
+                snapshot,
+                "success success failure skipped skipped skipped skipped skipped skipped skipped skipped skipped",
+            )
+            self.assertEqual("partial_success", result["final_outcome"])
+            self.assertEqual("compile_failed", result["failure_kind"])
+            self.assertEqual("relay", result["repair_mode"])
+            self.assertEqual("1", result["rounds"])
+            self.assertEqual("failure", result["recheck_outcome"])
+            self.assertEqual("docs/fr/index.md docs/fr/poison.md", result["failed_paths"])
+            self.assertEqual("docs/fr/poison.md", result["nonsyntax_failed_paths"])
+            self.assertEqual(["docs/fr/index.md"], [record["path"] for record in result["report"]["changed_paths"]])
+            self.assertEqual("mdx", result["report"]["error_source"])
+            self.assertEqual(3, result["report"]["error_line"])
+            self.assertEqual(1, result["report"]["error_column"])
+            self.assertEqual([], result["report"]["violations"])
+
+            # Relay success: strict recheck passed, no failures recorded.
+            result = report_with([], {"docs/fr/guide.md": guide_hash}, "success success success skipped skipped skipped skipped skipped skipped skipped skipped skipped")
+            self.assertEqual("success", result["final_outcome"])
+            self.assertEqual("success", result["recheck_outcome"])
+            self.assertEqual("", result["failed_paths"])
+
+            # Relay never started (not_run decision).
+            result = report_with([compile_error], snapshot, "skipped skipped skipped skipped skipped skipped skipped skipped skipped skipped skipped skipped", decision="not_run")
+            self.assertEqual("not_run", result["final_outcome"])
+            self.assertEqual("none", result["repair_mode"])
+
+            # All pending pages still failing: explicit final failure.
+            damage = {"type": "mdx", "file": "docs/fr/guide.md", "line": 1, "column": 1, "message": "boom"}
+            result = report_with([compile_error, damage, poison_error], snapshot, "success success failure skipped skipped skipped skipped skipped skipped skipped skipped skipped")
+            self.assertEqual("final_failure", result["final_outcome"])
+            self.assertEqual("compile_failed", result["failure_kind"])
+
+            # Hard action failure (timeout/crash) never counts as success.
+            result = report_with([compile_error], snapshot, "failure skipped skipped skipped skipped skipped skipped skipped skipped skipped skipped skipped")
+            self.assertEqual("final_failure", result["final_outcome"])
+            self.assertEqual("action_failed", result["failure_kind"])
+
+            # Repair-phase page deletion/emptying is a content-loss violation.
+            loss_snapshot = {
+                **snapshot,
+                "docs/fr/deleted.md": "gone",
+                "docs/fr/emptied.md": "gone-too",
+            }
+            (docs / "fr/emptied.md").write_text("", encoding="utf-8")
+            result = report_with([], loss_snapshot, "success success success skipped skipped skipped skipped skipped skipped skipped skipped skipped")
+            self.assertEqual("final_failure", result["final_outcome"])
+            self.assertEqual("content_loss", result["failure_kind"])
+            codes = [violation["code"] for violation in result["report"]["violations"]]
+            self.assertEqual(["whole_document_deleted", "empty_output"], codes)
+
+    def test_package_artifact_partial_success_keeps_passing_pages_and_marks_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            init_repo(repo)
+            (repo / ".openclaw-sync").mkdir()
+            (repo / "docs/fr").mkdir(parents=True)
+            (repo / "docs/index.md").write_text("# Index\n", encoding="utf-8")
+            (repo / "docs/guide.md").write_text("# Guide\n", encoding="utf-8")
+            run_git(repo, "add", ".")
+            run_git(repo, "commit", "-m", "initial")
+
+            # Both pages are new translations; one is damaged beyond the
+            # deterministic rescue, one is healthy.
+            (repo / "docs/fr/index.md").write_text("Texte {{ready &&\n", encoding="utf-8")
+            (repo / "docs/fr/guide.md").write_text("# Guide FR\n", encoding="utf-8")
+            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(f"{repo / 'docs/index.md'}\n{repo / 'docs/guide.md'}\n", encoding="utf-8")
+            mdx_dir = repo / ".openclaw-sync/mdx"
+            mdx_dir.mkdir(parents=True)
+            (mdx_dir / "fr-repair-report.json").write_text('{"repair_mode": "relay", "rounds": 2}\n', encoding="utf-8")
+
+            with chdir(repo), env(
+                {
+                    "GITHUB_WORKSPACE": str(repo),
+                    "LOCALE": "fr",
+                    "LOCALE_SLUG": "fr",
+                    "SOURCE_SHA": "source-a",
+                    "MODE": "full",
+                    "SHARD_INDEX": "0",
+                    "SHARD_TOTAL": "1",
+                    "WORKER_PARALLEL": "3",
+                    "THINKING_EFFORT": "xhigh",
+                    "PENDING_COUNT": "2",
+                    "TOTAL_PENDING_COUNT": "2",
+                    "ALL_COUNT": "2",
+                    "TRANSLATE_OUTCOME": "success",
+                    "MDX_CHECK_OUTCOME": "failure",
+                    "MDX_REPAIR_OUTCOME": "success",
+                    "MDX_SCOPE_OUTCOME": "success",
+                    "MDX_RECHECK_OUTCOME": "failure",
+                    "MDX_REPAIR_FINAL_OUTCOME": "partial_success",
+                    "MDX_REPAIR_FAILURE_KIND": "compile_failed",
+                    "MDX_REPAIR_MODE": "relay",
+                    "MDX_REPAIR_ROUNDS": "2",
+                    "MDX_REPAIR_FAILED_PATHS": "docs/fr/index.md",
+                    "MDX_REPAIR_CHANGED_PATHS": "docs/fr/index.md docs/fr/guide.md",
+                }
+            ):
+                metadata = package_artifact.package_artifact(repo, Path(".openclaw-sync"))
+
+            artifact = repo / ".openclaw-sync/artifacts/fr-s0of1"
+            # The damaged page is excluded and explicitly marked; the healthy
+            # page is packaged normally instead of dropping the whole shard.
+            self.assertEqual("", metadata["failed_reason"])
+            self.assertEqual(["docs/fr/guide.md"], (artifact / "changed-files.txt").read_text(encoding="utf-8").splitlines())
+            self.assertTrue((artifact / "payload/docs/fr/guide.md").exists())
+            self.assertFalse((artifact / "payload/docs/fr/index.md").exists())
+            self.assertEqual("partial", metadata["mdx_syntax_repair_outcome"])
+            self.assertEqual("partial_success", metadata["mdx_repair_final_outcome"])
+            self.assertEqual("relay", metadata["mdx_repair_mode"])
+            self.assertEqual(2, metadata["mdx_repair_rounds"])
+            self.assertEqual(["docs/fr/index.md"], metadata["mdx_repair_failed_paths"])
+            self.assertEqual(["docs/fr/guide.md", "docs/fr/index.md"], metadata["mdx_repair_changed_paths"])
+            report = json.loads((artifact / "mdx-repair-report.json").read_text(encoding="utf-8"))
+            self.assertEqual("relay", report["repair_mode"])
+
+    def test_package_artifact_salvages_fixable_pages_in_partial_shard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            init_repo(repo)
+            (repo / ".openclaw-sync").mkdir()
+            (repo / "docs/fr").mkdir(parents=True)
+            (repo / "docs/note.md").write_text("<Note>Take care</Note>\n", encoding="utf-8")
+            run_git(repo, "add", ".")
+            run_git(repo, "commit", "-m", "initial")
+
+            # The unclosed element is deterministic-rescueable, so the page is
+            # salvaged and packaged even though the relay reported it failed.
+            (repo / "docs/fr/note.md").write_text("<Note>Prendre soin\n", encoding="utf-8")
+            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(f"{repo / 'docs/note.md'}\n", encoding="utf-8")
+
+            with chdir(repo), env(
+                {
+                    "GITHUB_WORKSPACE": str(repo),
+                    "LOCALE": "fr",
+                    "LOCALE_SLUG": "fr",
+                    "SOURCE_SHA": "source-a",
+                    "MODE": "full",
+                    "SHARD_INDEX": "0",
+                    "SHARD_TOTAL": "1",
+                    "WORKER_PARALLEL": "3",
+                    "THINKING_EFFORT": "xhigh",
+                    "PENDING_COUNT": "1",
+                    "TOTAL_PENDING_COUNT": "1",
+                    "ALL_COUNT": "1",
+                    "TRANSLATE_OUTCOME": "success",
+                    "MDX_CHECK_OUTCOME": "failure",
+                    "MDX_REPAIR_OUTCOME": "success",
+                    "MDX_SCOPE_OUTCOME": "success",
+                    "MDX_RECHECK_OUTCOME": "failure",
+                    "MDX_REPAIR_FINAL_OUTCOME": "partial_success",
+                    "MDX_REPAIR_FAILURE_KIND": "compile_failed",
+                    "MDX_REPAIR_MODE": "relay",
+                    "MDX_REPAIR_ROUNDS": "1",
+                    "MDX_REPAIR_FAILED_PATHS": "docs/fr/note.md",
+                }
+            ):
+                metadata = package_artifact.package_artifact(repo, Path(".openclaw-sync"))
+
+            artifact = repo / ".openclaw-sync/artifacts/fr-s0of1"
+            self.assertEqual("", metadata["failed_reason"])
+            self.assertEqual(["docs/fr/note.md"], (artifact / "changed-files.txt").read_text(encoding="utf-8").splitlines())
+            self.assertEqual("<Note>Prendre soin</Note>\n", (artifact / "payload/docs/fr/note.md").read_text(encoding="utf-8"))
+            self.assertEqual("success", metadata["mdx_syntax_repair_outcome"])
+            # Every relay-failed page was rescued, so the shard result is a
+            # full success.
+            self.assertEqual("success", metadata["mdx_repair_final_outcome"])
+            self.assertEqual([], metadata["mdx_repair_failed_paths"])
+
+    def test_package_artifact_repair_relay_metadata_on_clean_shard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            init_repo(repo)
+            (repo / ".openclaw-sync").mkdir()
+            (repo / "docs").mkdir()
+            (repo / "docs/index.md").write_text("# Index\n", encoding="utf-8")
+            run_git(repo, "add", ".")
+            run_git(repo, "commit", "-m", "initial")
+            (repo / "docs/fr").mkdir()
+            (repo / "docs/fr/index.md").write_text("# Index FR\n", encoding="utf-8")
+            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(str(repo / "docs/index.md") + "\n", encoding="utf-8")
+
+            with chdir(repo), env(
+                {
+                    "GITHUB_WORKSPACE": str(repo),
+                    "LOCALE": "fr",
+                    "LOCALE_SLUG": "fr",
+                    "SOURCE_SHA": "source-a",
+                    "MODE": "incremental",
+                    "SHARD_INDEX": "0",
+                    "SHARD_TOTAL": "1",
+                    "WORKER_PARALLEL": "3",
+                    "THINKING_EFFORT": "medium",
+                    "PENDING_COUNT": "1",
+                    "TOTAL_PENDING_COUNT": "1",
+                    "ALL_COUNT": "1",
+                    "TRANSLATE_OUTCOME": "success",
+                    "MDX_CHECK_OUTCOME": "success",
+                    "MDX_REPAIR_OUTCOME": "skipped",
+                    "MDX_SCOPE_OUTCOME": "skipped",
+                    "MDX_RECHECK_OUTCOME": "skipped",
+                    "MDX_REPAIR_FINAL_OUTCOME": "not_run",
+                    "MDX_REPAIR_MODE": "none",
+                    "MDX_REPAIR_ROUNDS": "0",
+                }
+            ):
+                metadata = package_artifact.package_artifact(repo, Path(".openclaw-sync"))
+
+            self.assertEqual("", metadata["failed_reason"])
+            self.assertEqual("not_run", metadata["mdx_repair_final_outcome"])
+            self.assertEqual("none", metadata["mdx_repair_mode"])
+            self.assertEqual(0, metadata["mdx_repair_rounds"])
+            self.assertEqual([], metadata["mdx_repair_failed_paths"])
+            self.assertFalse((repo / ".openclaw-sync/artifacts/fr-s0of1/mdx-repair-report.json").exists())
+
+    def test_package_artifact_syntax_salvage_fails_closed_on_infrastructure_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            init_repo(repo)
+            (repo / ".openclaw-sync").mkdir()
+            (repo / "docs").mkdir()
+            (repo / "docs/index.md").write_text("# Index\n", encoding="utf-8")
+            run_git(repo, "add", ".")
+            run_git(repo, "commit", "-m", "initial")
+            (repo / "docs/fr").mkdir()
+            (repo / "docs/fr/index.md").write_text("# Index FR\n", encoding="utf-8")
+            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(str(repo / "docs/index.md") + "\n", encoding="utf-8")
+
+            with (
+                chdir(repo),
+                patch.object(package_artifact, "repair_mdx_syntax", return_value=("node crashed without page info", [], True)),
+                env(
+                    {
+                        "GITHUB_WORKSPACE": str(repo),
+                        "LOCALE": "fr",
+                        "LOCALE_SLUG": "fr",
+                        "SOURCE_SHA": "source-a",
+                        "MODE": "incremental",
+                        "SHARD_INDEX": "0",
+                        "SHARD_TOTAL": "1",
+                        "WORKER_PARALLEL": "3",
+                        "THINKING_EFFORT": "medium",
+                        "PENDING_COUNT": "1",
+                        "TOTAL_PENDING_COUNT": "1",
+                        "ALL_COUNT": "1",
+                        "TRANSLATE_OUTCOME": "success",
+                        "MDX_CHECK_OUTCOME": "success",
+                        "MDX_REPAIR_OUTCOME": "skipped",
+                        "MDX_SCOPE_OUTCOME": "skipped",
+                        "MDX_RECHECK_OUTCOME": "skipped",
+                    }
+                ),
+            ):
+                metadata = package_artifact.package_artifact(repo, Path(".openclaw-sync"))
+
+            # A salvage run that cannot name a failing page is infrastructure
+            # failure, not per-page salvage: the shard fails closed.
+            self.assertEqual("mdx syntax repair failed", metadata["failed_reason"])
+            self.assertEqual("", (repo / ".openclaw-sync/artifacts/fr-s0of1/changed-files.txt").read_text(encoding="utf-8"))
+
+    def test_apply_artifacts_reports_mdx_repair_unresolved_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo_with_source(tmp)
+            artifacts = repo / ".openclaw-sync/i18n-artifacts"
+            summary = Path(tmp) / "step-summary.txt"
+            self._write_artifact(
+                artifacts,
+                "partial",
+                metadata={
+                    "failed_reason": "",
+                    "locale": "fr",
+                    "locale_slug": "fr",
+                    "mode": "incremental",
+                    "shard_index": 0,
+                    "shard_total": 1,
+                    "source_sha": "source-a",
+                    "mdx_repair_mode": "relay",
+                    "mdx_repair_rounds": 4,
+                    "mdx_repair_final_outcome": "partial_success",
+                    "mdx_repair_failed_paths": ["docs/fr/broken.md"],
+                },
+                changed=["docs/fr/index.md"],
+                payload={"docs/fr/index.md": "# Index FR\n"},
+            )
+
+            with chdir(repo), env({"GITHUB_STEP_SUMMARY": str(summary)}):
+                result = apply_artifacts.apply_artifacts(
+                    source_sha="source-a",
+                    mode="incremental",
+                    shard_total=1,
+                    expected_locales="fr=fr",
+                    artifacts_root=artifacts,
+                    skip_checkout_main=True,
+                )
+
+            # The shard applies (failed_reason stays empty) and the finalizer
+            # interprets the per-page failure marking in its summary.
+            self.assertEqual(0, result["incomplete_count"])
+            self.assertTrue((repo / "docs/fr/index.md").exists())
+            self.assertIn("mdx repair unresolved pages", summary.read_text(encoding="utf-8"))
+            self.assertIn("fr: 1 page(s) still failing strict MDX", summary.read_text(encoding="utf-8"))
 
     def test_full_summary_ignores_canary_as_locale_success_and_reports_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

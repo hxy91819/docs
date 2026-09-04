@@ -5,7 +5,7 @@
   "plan": "EPIC-I18N-MDX-CODEX-FALLBACK",
   "title": "接入翻译流水线",
   "intent_version": 3,
-  "status": "in_progress",
+  "status": "done",
   "blocked_by": [
     "STORY-03.1"
   ],
@@ -19,27 +19,27 @@
     {
       "id": "AC-01",
       "criterion": "正式翻译路径按实验确定的顺序调用增强后的现有 Codex action；可选辅助仅在用户批准且通过安全复验后启用。",
-      "passed": false
+      "passed": true
     },
     {
       "id": "AC-02",
       "criterion": "正式路径不会新增第二个 Codex action；Prettier/PR #153 未批准或无净收益时不得产生生产改动。",
-      "passed": false
+      "passed": true
     },
     {
       "id": "AC-03",
       "criterion": "既有 MDX、范围和受保护属性门禁继续运行，且不会被 fallback 绕过。",
-      "passed": false
+      "passed": true
     },
     {
       "id": "AC-04",
       "criterion": "fallback 结果、失败原因和修改路径出现在 artifact metadata、摘要或结构化日志中。",
-      "passed": false
+      "passed": true
     },
     {
       "id": "AC-05",
       "criterion": "失败页面不会静默覆盖或删除其他成功结果，回退路径可在 CI 中复现。",
-      "passed": false
+      "passed": true
     }
   ],
   "context": {
@@ -72,14 +72,20 @@
   "blocker": null,
   "updated": "2026-09-04",
   "handoff": {
-    "summary": "交接时记录 Story、清单计数、基线、命令/退出码、证据路径、Git 状态和下一 Story 输入。",
+    "summary": "STORY-04 完成。单一 codex-action@v1 入口增强为 ≤4 轮有界接力（Repair→Enforce scope→Recheck，轮 N+1 需 MAX_ATTEMPTS>=N+上轮 scope success+上轮 recheck failure 三重门控）；新增 .github/scripts/i18n/mdx_repair_relay.py decide/report（契约 §1 启动条件 not_run 四类、预算与辅助开关 fail-closed、内容快照、无阈值内容丢失守卫、repair_mode/rounds/顶层 error 三元组、changed paths sha256）；package_artifact 逐页 partial-success（不可救页排除+标记，成功页正常打包；基础设施错误整 shard fail-closed）；apply_artifacts finalizer 解释 failed_paths；docs-mdx-repair.md 更新接力措辞。validator=delegate 结论 CONTINUE。生产预算按 D-10 提高为单轮 600s（步级 timeout 12min），取代 D-09 的 300s 生产默认；300s 保留为实验实测基线。",
     "verification": [
-      "本地 workflow shell/budget/test 输出、artifact fixture 和 diff 检查。"
+      "pytest .github/scripts/i18n/tests/ 119 passed（编排者本机复跑确认；11 新增+3 修改，含 2 个基线即红诚实修复：pin 0.146.1 对齐上游、git restore --staged 沙箱守卫重排且断言保留）",
+      "YAML+actionlint 通过；步骤顺序=契约顺序，恰 4 个 codex-action，0 codex exec，0 prettier/pr153",
+      "decide/report/package CLI 以工作流调用方式端到端实跑",
+      "无 staged 文件；变更仅授权路径"
     ],
-    "remaining": [
-      "继续 v1 Story 的剩余工作。"
+    "remaining": [],
+    "risks": [
+      ".openclaw-sync/docs-mdx-repair.md 为源同步镜像（AGENTS.md Do-Not-Edit）：本次 D-09 授权修改需向上游 openclaw/openclaw 同步同一接力措辞，否则下次 source sync 会覆盖——需在上游仓库开跟进",
+      "relay 第 2 轮与预算耗尽路径真实模式未出现，仅离线 mock 覆盖（STORY-05 真实链路观察点）",
+      "工作流模型/CLI 与 STORY-03 实验组合等价性未测（STORY-05）",
+      ".md 页 JSX 损伤只在打包期严格暴露（relay 覆盖既有 Check 所见）；现按页 salvage 而非整 shard 丢弃"
     ],
-    "risks": [],
-    "next": "按迁移后的 frontier 继续。"
+    "next": "STORY-05 独立 CI 验证子流水线：真实 Codex opt-in 触发、runner 权限/artifact 链路、离线必过与 opt-in/环境失败三态区分；复用同一 codex-action 参数协议与 D-10 预算。"
   }
 }

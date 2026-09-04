@@ -137,6 +137,13 @@
         "rationale": "用户确认激进策略：真实失败页修复优先，诊断全留档供后期分析；300s 实测可完成单轮修复，接力可覆盖 taxonomy 类多错误页。",
         "impact": "上限保留防止不可修复页（如不可确定 JS expression 损坏）无限消耗；辅助臂保持 fail-closed 不进生产；STORY-04 据此接入，STORY-03 增补一次接力实测（taxonomy 回归）后再收口 STORY-03.1。",
         "owner": "user"
+      },
+      {
+        "id": "D-10",
+        "decision": "用户决策（2026-09-04）：生产单轮修复预算 HARD_TIMEOUT_MS 由 300s 提高到 600s（workflow 步级 timeout-minutes 同步 6→12），取代 D-09 中的 300s 生产默认；保持 env 可注入与 fail-closed。",
+        "rationale": "用户判断 codex 实际干活偏慢；实测 n=2 最大 167s 已占 300s 预算 56%，生产页更大、多轮接力与模型延迟方差未覆盖；120s 轮已证明超时击杀会浪费已完成的修复。600s=实测最大值 2 倍余量；最坏 4×600s=40 分钟/轮次链，有界。",
+        "impact": "STORY-04 工作流 env 与步级超时同步调整、相关测试断言更新；STORY-05/06 继续采集行时数据，值可随时 env 调整；300s 保留为实验实测基线记录。",
+        "owner": "user"
       }
     ],
     "testing": {

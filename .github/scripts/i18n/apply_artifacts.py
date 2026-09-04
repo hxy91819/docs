@@ -53,6 +53,7 @@ class ApplyState:
     stale: list[str] = field(default_factory=list)
     invalid: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    mdx_repair_failed: list[str] = field(default_factory=list)
     skipped_stale_pages: list[str] = field(default_factory=list)
     skipped_stale_deletes: list[str] = field(default_factory=list)
     skipped_stale_tm: list[str] = field(default_factory=list)
@@ -250,6 +251,14 @@ def process_artifact(
     if failed_reason:
         state.failed.append(f"{artifact_label(locale, shard_index, expected_shard_total)}: {failed_reason}")
         return
+    # Partial-success semantics (AC-05): the shard applies normally, and the
+    # finalizer reports the pages the bounded Codex relay could not fix.
+    mdx_repair_failed_paths = metadata.get("mdx_repair_failed_paths")
+    if isinstance(mdx_repair_failed_paths, list) and mdx_repair_failed_paths:
+        state.mdx_repair_failed.append(
+            f"{artifact_label(locale, shard_index, expected_shard_total)}: "
+            f"{len(mdx_repair_failed_paths)} page(s) still failing strict MDX"
+        )
     if slug not in complete_locales:
         state.skipped_incomplete.append(artifact_label(locale, shard_index, expected_shard_total))
         return
@@ -320,6 +329,10 @@ def write_summary(mode: str, expected_shard_total: int, source_sha: str, current
             fh.write(f"- applied artifacts: {', '.join(state.applied)}\n")
         if state.no_changes:
             fh.write(f"- artifacts with no changes: {', '.join(state.no_changes)}\n")
+        if state.failed:
+            fh.write(f"- failed artifacts: {', '.join(state.failed)}\n")
+        if state.mdx_repair_failed:
+            fh.write(f"- mdx repair unresolved pages: {', '.join(state.mdx_repair_failed)}\n")
         if missing_or_failed:
             fh.write(f"- missing or failed artifacts: {', '.join(missing_or_failed)}\n")
         if state.skipped_incomplete:

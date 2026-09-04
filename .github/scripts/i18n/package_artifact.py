@@ -19,6 +19,13 @@ Environment:
   WORKER_PARALLEL, THINKING_EFFORT, PENDING_COUNT, TOTAL_PENDING_COUNT,
   ALL_COUNT, optional ARTIFACT_ROLE, TRANSLATE_OUTCOME, MDX_CHECK_OUTCOME,
   MDX_REPAIR_OUTCOME, MDX_SCOPE_OUTCOME, and MDX_RECHECK_OUTCOME.
+  MDX repair relay (mdx_repair_relay.py): MDX_REPAIR_FINAL_OUTCOME,
+  MDX_REPAIR_FAILURE_KIND, MDX_REPAIR_MODE, MDX_REPAIR_ROUNDS,
+  MDX_REPAIR_FAILED_PATHS, MDX_REPAIR_NONSYNTAX_FAILED_PATHS, and
+  MDX_REPAIR_CHANGED_PATHS. Partial-success protection (AC-05): when the
+  bounded Codex relay could not fix every page, pages that still fail the
+  strict parser are excluded from the artifact and explicitly marked in
+  metadata instead of silently dropping the shard's successful pages.
 
 Outputs:
   Writes .openclaw-sync/artifacts/<locale_slug>-s<index>of<total>/ with
@@ -63,12 +70,19 @@ def env_int(name: str) -> int:
         raise SystemExit(f"invalid {name}: {os.environ.get(name, '')}") from exc
 
 
+def relay_env_paths(name: str) -> list[str]:
+    raw = os.environ.get(name, "")
+    return [path for path in raw.replace(",", " ").split() if path]
+
+
 def failure_reason() -> str:
     translate_outcome = os.environ.get("TRANSLATE_OUTCOME", "skipped")
     mdx_check_outcome = os.environ.get("MDX_CHECK_OUTCOME", "skipped")
     mdx_repair_outcome = os.environ.get("MDX_REPAIR_OUTCOME", "skipped")
     mdx_scope_outcome = os.environ.get("MDX_SCOPE_OUTCOME", "skipped")
     mdx_recheck_outcome = os.environ.get("MDX_RECHECK_OUTCOME", "skipped")
+    relay_final_outcome = os.environ.get("MDX_REPAIR_FINAL_OUTCOME", "not_run")
+    relay_failure_kind = os.environ.get("MDX_REPAIR_FAILURE_KIND", "none")
 
     if translate_outcome == "failure":
         return "translation failed"
@@ -78,6 +92,14 @@ def failure_reason() -> str:
         if mdx_scope_outcome == "failure":
             return "mdx repair scope failed"
         if mdx_recheck_outcome != "success":
+            # The bounded relay finished its gates; per-page partial success
+            # keeps the shard's passing pages instead of dropping them.
+            if relay_final_outcome in {"success", "partial_success"}:
+                return ""
+            if relay_failure_kind == "scope_failed":
+                return "mdx repair scope failed"
+            if relay_failure_kind == "content_loss":
+                return "mdx repair deleted translated content"
             return "mdx repair failed"
     return ""
 
@@ -190,6 +212,7 @@ def repair_mdx_syntax(
     locale_slug: str,
     shard_index: int,
     shard_total: int,
+    manifest_path: Path | None = None,
 ) -> tuple[str, list[str], bool]:
     """Make translated MDX parse again before attribute-level repair runs.
 
@@ -197,7 +220,7 @@ def repair_mdx_syntax(
     attribute repair assumes a parseable document, so files this stage cannot
     rescue still fail the shard here with a parser-backed reason.
     """
-    manifest = workspace / ".openclaw-sync" / f"docs-i18n-{locale_slug}-s{shard_index}of{shard_total}.txt"
+    manifest = manifest_path or workspace / ".openclaw-sync" / f"docs-i18n-{locale_slug}-s{shard_index}of{shard_total}.txt"
     if not manifest.is_file():
         return f"missing pending manifest: {manifest}", [], False
     source_paths = [Path(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -248,14 +271,76 @@ def repair_mdx_syntax(
     return "", repaired, True
 
 
+def repair_mdx_syntax_with_salvage(
+    workspace: Path,
+    locale: str,
+    locale_slug: str,
+    shard_index: int,
+    shard_total: int,
+) -> tuple[str, list[str], list[str], bool]:
+    """Run the deterministic syntax rescue with per-page salvage.
+
+    Pages the repair chain cannot rescue are returned as still-failing
+    workspace locale paths instead of failing the whole shard, so partial
+    success (AC-05) can exclude exactly those pages while keeping the shard's
+    successful translations. Infrastructure failures (a repair run that does
+    not name a failing page) stay hard errors: uncertain states must fail the
+    shard rather than look like per-page salvage.
+
+    Returns (error, repaired paths, still-failing locale paths, ran).
+    """
+    manifest = workspace / ".openclaw-sync" / f"docs-i18n-{locale_slug}-s{shard_index}of{shard_total}.txt"
+    if not manifest.is_file():
+        return f"missing pending manifest: {manifest}", [], [], False
+    source_paths = [Path(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+    repairable_sources = [path for path in source_paths if path.suffix in {".md", ".mdx"}]
+    if not repairable_sources:
+        return "", [], [], False
+    docs_root = (workspace / "docs").resolve()
+
+    def locale_path(source: Path) -> str | None:
+        try:
+            return f"docs/{locale}/{source.resolve().relative_to(docs_root).as_posix()}"
+        except ValueError:
+            return None
+
+    salvage_manifest = workspace / ".openclaw-sync" / "mdx" / f"{locale}.package-partial-manifest.txt"
+    salvage_manifest.parent.mkdir(parents=True, exist_ok=True)
+    repaired: list[str] = []
+    still_failing: list[str] = []
+    remaining = list(repairable_sources)
+    for _attempt in range(len(repairable_sources) + 1):
+        if not remaining:
+            break
+        salvage_manifest.write_text("\n".join(str(path) for path in remaining) + "\n", encoding="utf-8")
+        error, batch, _ran = repair_mdx_syntax(
+            workspace, locale, locale_slug, shard_index, shard_total, manifest_path=salvage_manifest
+        )
+        repaired.extend(batch)
+        if not error:
+            break
+        match = re.search(rf"Error: docs/{re.escape(locale)}/([^:\n]+):", error)
+        failed_path = f"docs/{locale}/{match.group(1)}" if match else ""
+        if not failed_path or failed_path in still_failing or failed_path not in {
+            locale_path(source) for source in remaining
+        }:
+            # Not a per-page failure (or no progress): fail the shard closed.
+            return error, repaired, still_failing, True
+        still_failing.append(failed_path)
+        remaining = [source for source in remaining if locale_path(source) != failed_path]
+    salvage_manifest.unlink(missing_ok=True)
+    return "", repaired, still_failing, True
+
+
 def repair_mdx_protected_attributes(
     workspace: Path,
     locale: str,
     locale_slug: str,
     shard_index: int,
     shard_total: int,
+    manifest_path: Path | None = None,
 ) -> tuple[str, list[str], bool]:
-    manifest = workspace / ".openclaw-sync" / f"docs-i18n-{locale_slug}-s{shard_index}of{shard_total}.txt"
+    manifest = manifest_path or workspace / ".openclaw-sync" / f"docs-i18n-{locale_slug}-s{shard_index}of{shard_total}.txt"
     if not manifest.is_file():
         return f"missing pending manifest: {manifest}", [], False
     source_paths = [Path(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -336,6 +421,31 @@ def append_summary(metadata: dict[str, object]) -> None:
         syntax_outcome = str(metadata.get("mdx_syntax_repair_outcome") or "skipped")
         if syntax_outcome != "skipped":
             fh.write(f"- mdx syntax repair: `{syntax_outcome}`\n")
+        repair_mode = str(metadata.get("mdx_repair_mode") or "none")
+        if repair_mode != "none":
+            fh.write(
+                f"- mdx repair relay: mode=`{repair_mode}` rounds=`{metadata.get('mdx_repair_rounds', 0)}` "
+                f"final=`{metadata.get('mdx_repair_final_outcome', 'not_run')}`\n"
+            )
+        failed_paths = metadata.get("mdx_repair_failed_paths") or []
+        if failed_paths:
+            fh.write(f"- mdx repair unresolved pages: `{', '.join(str(path) for path in failed_paths)}`\n")
+
+
+def relay_metadata() -> dict[str, object]:
+    """Carry the bounded Codex relay outcome (D-09) into artifact metadata."""
+    rounds_raw = os.environ.get("MDX_REPAIR_ROUNDS", "0")
+    try:
+        rounds = int(rounds_raw)
+    except ValueError:
+        rounds = 0
+    return {
+        "mdx_repair_mode": os.environ.get("MDX_REPAIR_MODE", "none") or "none",
+        "mdx_repair_rounds": max(rounds, 0),
+        "mdx_repair_final_outcome": os.environ.get("MDX_REPAIR_FINAL_OUTCOME", "not_run") or "not_run",
+        "mdx_repair_failed_paths": sorted(set(relay_env_paths("MDX_REPAIR_FAILED_PATHS"))),
+        "mdx_repair_changed_paths": sorted(set(relay_env_paths("MDX_REPAIR_CHANGED_PATHS"))),
+    }
 
 
 def package_artifact(workspace: Path, openclaw_sync_dir: Path) -> dict[str, object]:
@@ -355,6 +465,9 @@ def package_artifact(workspace: Path, openclaw_sync_dir: Path) -> dict[str, obje
 
     protected_attribute_repair_outcome = "skipped"
     mdx_syntax_repair_outcome = "skipped"
+    excluded_paths: list[str] = []
+    marked_failed_paths: list[str] = []
+    effective_relay_outcome = os.environ.get("MDX_REPAIR_FINAL_OUTCOME", "not_run") or "not_run"
     if failed_reason:
         write_lines(changed_path, [])
         write_lines(deleted_path, [])
@@ -370,17 +483,42 @@ def package_artifact(workspace: Path, openclaw_sync_dir: Path) -> dict[str, obje
         # Packaging is also the first gate that sees .md pages under MDX
         # semantics: check-docs-mdx compiles by extension (markdown for .md),
         # so JSX damage in .md files passes the workflow check and only fails
-        # the strict format:"mdx" parsers in this repair chain.
-        syntax_repair_error, syntax_repaired_paths, syntax_repair_ran = repair_mdx_syntax(
+        # the strict format:"mdx" parsers in this repair chain. Pages this
+        # rescue cannot fix are salvaged per page (AC-05): they are excluded
+        # from the artifact and marked, instead of silently dropping the
+        # shard's successful pages.
+        syntax_repair_error, syntax_repaired_paths, still_failing_paths, syntax_repair_ran = repair_mdx_syntax_with_salvage(
             workspace, locale, locale_slug, shard_index, shard_total
         )
+        relay_nonsyntax_paths = relay_env_paths("MDX_REPAIR_NONSYNTAX_FAILED_PATHS")
+        # Relay-diagnosed non-syntax failures (poison-text, Mintlify structure)
+        # cannot be fixed by the syntax rescue, so they stay excluded.
+        excluded_paths = sorted(
+            (set(still_failing_paths) | set(relay_nonsyntax_paths)) & allowed
+        )
         mdx_syntax_repair_outcome = (
-            "failure" if syntax_repair_error else "success" if syntax_repair_ran else "skipped"
+            "failure"
+            if syntax_repair_error
+            else "partial" if excluded_paths else "success" if syntax_repair_ran else "skipped"
         )
         if syntax_repair_error:
             print(f"MDX syntax repair failed: {syntax_repair_error}", file=sys.stderr)
+        protected_manifest: Path | None = None
+        if excluded_paths:
+            excluded_sources = {(workspace / "docs" / path.removeprefix(f"docs/{locale}/")) for path in excluded_paths}
+            original_manifest = workspace / ".openclaw-sync" / f"docs-i18n-{locale_slug}-s{shard_index}of{shard_total}.txt"
+            if original_manifest.is_file():
+                kept = [
+                    line
+                    for line in original_manifest.read_text(encoding="utf-8").splitlines()
+                    if line.strip() and Path(line.strip()) not in excluded_sources
+                ]
+                filtered_manifest = workspace / ".openclaw-sync" / "mdx" / f"{locale}.package-protected-manifest.txt"
+                filtered_manifest.parent.mkdir(parents=True, exist_ok=True)
+                filtered_manifest.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+                protected_manifest = filtered_manifest
         protected_attribute_repair_error, repaired_paths, protected_attribute_repair_ran = repair_mdx_protected_attributes(
-            workspace, locale, locale_slug, shard_index, shard_total
+            workspace, locale, locale_slug, shard_index, shard_total, manifest_path=protected_manifest
         )
         protected_attribute_repair_outcome = (
             "failure" if protected_attribute_repair_error else "success" if protected_attribute_repair_ran else "skipped"
@@ -393,6 +531,11 @@ def package_artifact(workspace: Path, openclaw_sync_dir: Path) -> dict[str, obje
         # The finalizer treats every changed-files.txt entry as a required
         # payload file, so allowed-but-missing TM paths must not be advertised.
         shard_changed = [line for line in changed if line in allowed and (workspace / line).is_file()]
+        # Partial-success protection (AC-05): pages the repair chain could not
+        # rescue (or with unfixable non-syntax damage) are excluded from the
+        # artifact and explicitly marked in metadata; the shard's successful
+        # pages are still packaged so completed translations are not wasted.
+        shard_changed = [line for line in shard_changed if line not in set(excluded_paths)]
         leaked_paths = leaked_i18n_protocol_paths(workspace, locale, shard_changed)
         protected_attribute_drift = (
             drifted_mdx_protected_attribute_paths(workspace, locale, shard_changed)
@@ -425,8 +568,21 @@ def package_artifact(workspace: Path, openclaw_sync_dir: Path) -> dict[str, obje
                 for index, line in enumerate(sorted(line for line in deleted if not line.startswith("docs/.i18n/")))
                 if index % shard_total == shard_index
             ]
+        # A repair-phase-deleted page is an unresolved failure, not an
+        # intentional deletion the finalizer should apply.
+        shard_deleted = [line for line in shard_deleted if line not in set(excluded_paths)]
         write_lines(changed_path, shard_changed)
         write_lines(deleted_path, shard_deleted)
+        relay_nonsyntax_paths = relay_env_paths("MDX_REPAIR_NONSYNTAX_FAILED_PATHS")
+        marked_failed_paths = sorted(
+            set(excluded_paths) | {path for path in relay_nonsyntax_paths if path.startswith(f"docs/{locale}/")}
+        )
+        if excluded_paths:
+            effective_relay_outcome = "partial_success"
+        elif effective_relay_outcome == "partial_success":
+            # Every page the relay left behind was rescued by the
+            # deterministic arm, so the shard result is a full success.
+            effective_relay_outcome = "success"
 
     for file_name in [line for line in changed_path.read_text(encoding="utf-8").splitlines() if line.strip()]:
         source = Path(file_name)
@@ -438,6 +594,10 @@ def package_artifact(workspace: Path, openclaw_sync_dir: Path) -> dict[str, obje
 
     changed_files = [line for line in changed_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     deleted_files = [line for line in deleted_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    relay_report = workspace / ".openclaw-sync" / "mdx" / f"{locale}-repair-report.json"
+    if relay_report.is_file():
+        shutil.copy2(relay_report, artifact_dir / "mdx-repair-report.json")
+    relay = relay_metadata()
     metadata: dict[str, object] = {
         "locale": locale,
         "locale_slug": locale_slug,
@@ -460,6 +620,11 @@ def package_artifact(workspace: Path, openclaw_sync_dir: Path) -> dict[str, obje
         "mdx_recheck_outcome": os.environ.get("MDX_RECHECK_OUTCOME", "skipped"),
         "mdx_syntax_repair_outcome": mdx_syntax_repair_outcome,
         "mdx_protected_attribute_repair_outcome": protected_attribute_repair_outcome,
+        "mdx_repair_mode": relay["mdx_repair_mode"],
+        "mdx_repair_rounds": relay["mdx_repair_rounds"],
+        "mdx_repair_final_outcome": effective_relay_outcome,
+        "mdx_repair_failed_paths": marked_failed_paths,
+        "mdx_repair_changed_paths": relay["mdx_repair_changed_paths"],
         "failed_reason": failed_reason,
     }
     (artifact_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
