@@ -1,0 +1,52 @@
+{
+  "auxiliary_mode": "none",
+  "changed_paths": [
+    {
+      "after_sha256": "82ac3e3cd1b053025518469ba7059e51aede520c3418770ec2adc58e9525fe47",
+      "before_sha256": "1f4e4c8f604f0e957e61edf48077d304ad01a4e40fec8a5c11c07af95a2ca6b6",
+      "path": "docs/zh-CN/maturity/taxonomy.mdx"
+    },
+    {
+      "after_sha256": "988a3a25c2c3684abc5003c5334f1b092aa97550f190c94a17eaecdc2d7a4718",
+      "before_sha256": "9eea41f0f9c50b9d4096a0d2773bb9468a535c90a0af660eeb14ad2fbee77d20",
+      "path": "docs/zh-CN/plugins-reference/anthropic-vertex.mdx"
+    }
+  ],
+  "decision": "run",
+  "deleted_paths": [],
+  "error_column": null,
+  "error_line": null,
+  "error_source": null,
+  "event": "final_outcome",
+  "failed_paths": [],
+  "failure_kind": "none",
+  "final_outcome": "success",
+  "hard_timeout_ms": 600000,
+  "locale": "zh-CN",
+  "max_attempts": 4,
+  "nonsyntax_failed_paths": [],
+  "not_run_reason": "",
+  "parser_diagnostics_count": 0,
+  "parser_outcome": "compile_success",
+  "recheck_outcome": "success",
+  "repair_attempts": 1,
+  "repair_mode": "relay",
+  "repair_stage_order": [
+    "parser",
+    "auxiliary",
+    "codex",
+    "checker",
+    "scope",
+    "protected_attribute",
+    "recheck",
+    "artifact"
+  ],
+  "rounds": 1,
+  "rounds_history": [
+    {
+      "error_count": 0,
+      "round": 1
+    }
+  ],
+  "violations": []
+}

@@ -1,0 +1,88 @@
+{
+  "fixture_expectations": [
+    {
+      "expected": {
+        "call": "compile(source, {jsx:true})",
+        "column": 2,
+        "compiler": "@mdx-js/mdx@3.1.1",
+        "line": 29,
+        "offset": 641,
+        "outcome": "compile_failure",
+        "reason_prefix": "Unexpected character `!` (U+0021) before name",
+        "source": "micromark-extension-mdx-jsx"
+      },
+      "file": "plans/i18n-codex-mdx-fallback/agent/evidence/story01-real-fixtures-2026-09-01/fixtures/zh-CN/plugins-reference/anthropic-vertex.md",
+      "fixture_id": "real-27629404260-zhcn-plugin-html-comment",
+      "match": true,
+      "observed": {
+        "bytes": 1128,
+        "error": {
+          "column": 2,
+          "end_column": null,
+          "end_line": null,
+          "line": 29,
+          "offset": 641,
+          "reason": "Unexpected character `!` (U+0021) before name, expected a character that can start a name, such as a letter, `$`, or `_` (note: to create a comment in MDX, use `{/* text */}`)",
+          "source": "micromark-extension-mdx-jsx"
+        },
+        "file": "/home/runner/work/docs/docs/plans/i18n-codex-mdx-fallback/agent/evidence/story01-real-fixtures-2026-09-01/fixtures/zh-CN/plugins-reference/anthropic-vertex.md",
+        "lines": 37,
+        "outcome": "compile_failure",
+        "parser": "@mdx-js/mdx@3.1.1 compile({jsx:true})",
+        "sha256": "9eea41f0f9c50b9d4096a0d2773bb9468a535c90a0af660eeb14ad2fbee77d20"
+      }
+    },
+    {
+      "expected": {
+        "call": "compile(source, {jsx:true})",
+        "column": 5,
+        "compiler": "@mdx-js/mdx@3.1.1",
+        "end_column": 11,
+        "line": 1075,
+        "offset": 114137,
+        "opening_tag_line": 975,
+        "outcome": "compile_failure",
+        "reason_prefix": "Unexpected closing tag `</div>`, expected corresponding closing tag for `<Accordion>`",
+        "source": "mdast-util-mdx-jsx"
+      },
+      "file": "plans/i18n-codex-mdx-fallback/agent/evidence/story01-real-fixtures-2026-09-01/fixtures/zh-CN/maturity/taxonomy.md",
+      "fixture_id": "real-27629404260-zhcn-taxonomy-stray-close",
+      "match": true,
+      "observed": {
+        "bytes": 446554,
+        "error": {
+          "column": 5,
+          "end_column": 11,
+          "end_line": 1075,
+          "line": 1075,
+          "offset": 114137,
+          "reason": "Unexpected closing tag `</div>`, expected corresponding closing tag for `<Accordion>` (975:3-975:43)",
+          "source": "mdast-util-mdx-jsx"
+        },
+        "file": "/home/runner/work/docs/docs/plans/i18n-codex-mdx-fallback/agent/evidence/story01-real-fixtures-2026-09-01/fixtures/zh-CN/maturity/taxonomy.md",
+        "lines": 3790,
+        "outcome": "compile_failure",
+        "parser": "@mdx-js/mdx@3.1.1 compile({jsx:true})",
+        "sha256": "1f4e4c8f604f0e957e61edf48077d304ad01a4e40fec8a5c11c07af95a2ca6b6"
+      }
+    }
+  ],
+  "gate": "strict-mdx-oracle",
+  "oracle": "plans/i18n-codex-mdx-fallback/agent/evidence/story01-real-fixtures-2026-09-01/strict-mdx-oracle.mjs",
+  "parser": "@mdx-js/mdx@3.1.1 compile({jsx:true})",
+  "passed": true,
+  "repair_references": [
+    {
+      "evidence": "plans/i18n-codex-mdx-fallback/agent/evidence/story03-local-loop-2026-09-01/real-opt-in/artifacts/real-27629404260-zhcn-plugin-html-comment-enhanced_existing_codex_action.json",
+      "fixture_id": "real-27629404260-zhcn-plugin-html-comment",
+      "match": true,
+      "observed_outcome": "compile_success"
+    },
+    {
+      "evidence": "plans/i18n-codex-mdx-fallback/agent/evidence/story03-local-loop-2026-09-01/real-opt-in/artifacts/real-27629404260-zhcn-taxonomy-stray-close-enhanced_existing_codex_action.json",
+      "fixture_id": "real-27629404260-zhcn-taxonomy-stray-close",
+      "match": true,
+      "observed_outcome": "compile_success"
+    }
+  ]
+}
