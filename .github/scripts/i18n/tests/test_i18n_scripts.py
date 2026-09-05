@@ -2691,6 +2691,12 @@ class I18NScriptTests(unittest.TestCase):
         self.assertEqual(4, text.count("uses: openai/codex-action@v1"))
         self.assertEqual(4, text.count("timeout-minutes: 12\n"))
         self.assertEqual(4, text.count("prompt-file: .openclaw-sync/docs-mdx-repair.md"))
+        # No legacy --full-auto CLI flag: sandbox/approval semantics are
+        # carried by the codex-action inputs themselves (sandbox,
+        # safety-strategy), matching the production minimal call surface.
+        self.assertNotIn("full-auto", text)
+        self.assertEqual(4, text.count("sandbox: workspace-write"))
+        self.assertEqual(4, text.count("safety-strategy: drop-sudo"))
         self.assertNotIn("codex exec", text)
         self.assertNotIn("prettier", text)
         self.assertNotIn("pr153", text)
@@ -3813,7 +3819,13 @@ class MdxRepairValidationWorkflowTests(unittest.TestCase):
         self.assertEqual(4, text.count("prompt-file: .openclaw-sync/docs-mdx-repair.md"))
         self.assertEqual(4, text.count("model: gpt-5.6"))
         self.assertEqual(4, text.count("effort: xhigh"))
-        self.assertEqual(4, text.count('codex-args: \'["--full-auto"]\''))
+        # No legacy --full-auto CLI flag: sandbox/approval semantics are
+        # carried by the codex-action inputs themselves (sandbox,
+        # safety-strategy), keeping the CLI call surface at the production
+        # minimum (codex 0.146.1 rejects --full-auto).
+        self.assertNotIn("full-auto", text)
+        self.assertEqual(4, text.count("sandbox: workspace-write"))
+        self.assertEqual(4, text.count("safety-strategy: drop-sudo"))
         self.assertNotIn("codex exec", text)
         self.assertNotIn("api.openai.com", text)
 

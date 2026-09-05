@@ -87,8 +87,8 @@ jobs:
           {
             echo "node=$(node --version)"
             echo "codex=$(codex --version)"
-            echo "mdx-js=$(node -p "require('@mdx-js/mdx/package.json').version")"
-            echo "tsx=$(node -p "require('tsx/package.json').version")"
+            echo "mdx-js=$(node -p "JSON.parse(require('node:fs').readFileSync('./node_modules/@mdx-js/mdx/package.json', 'utf8')).version")"
+            echo "tsx=$(node -p "JSON.parse(require('node:fs').readFileSync('./node_modules/tsx/package.json', 'utf8')).version")"
           } | tee "${EVIDENCE_DIR}/toolchain.txt"
 
       - name: Run i18n control-plane regressions
@@ -173,8 +173,8 @@ jobs:
           {
             echo "node=$(node --version)"
             echo "codex=$(codex --version)"
-            echo "mdx-js=$(node -p "require('@mdx-js/mdx/package.json').version")"
-            echo "tsx=$(node -p "require('tsx/package.json').version")"
+            echo "mdx-js=$(node -p "JSON.parse(require('node:fs').readFileSync('./node_modules/@mdx-js/mdx/package.json', 'utf8')).version")"
+            echo "tsx=$(node -p "JSON.parse(require('node:fs').readFileSync('./node_modules/tsx/package.json', 'utf8')).version")"
           } | tee "${EVIDENCE_DIR}/toolchain.txt"
 
       # Environment failures (quota, auth, model availability) are classified
@@ -267,7 +267,6 @@ jobs:
           effort: xhigh
           sandbox: workspace-write
           safety-strategy: drop-sudo
-          codex-args: '["--full-auto"]'
 
       - name: Enforce translated MDX repair scope
         id: mdx_scope
@@ -318,7 +317,6 @@ jobs:
           effort: xhigh
           sandbox: workspace-write
           safety-strategy: drop-sudo
-          codex-args: '["--full-auto"]'
 
       - name: Enforce translated MDX repair scope (relay round 2)
         id: mdx_scope_2
@@ -370,7 +368,6 @@ jobs:
           effort: xhigh
           sandbox: workspace-write
           safety-strategy: drop-sudo
-          codex-args: '["--full-auto"]'
 
       - name: Enforce translated MDX repair scope (relay round 3)
         id: mdx_scope_3
@@ -422,7 +419,6 @@ jobs:
           effort: xhigh
           sandbox: workspace-write
           safety-strategy: drop-sudo
-          codex-args: '["--full-auto"]'
 
       - name: Enforce translated MDX repair scope (relay round 4)
         id: mdx_scope_4

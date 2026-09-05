@@ -454,7 +454,6 @@ jobs:
           effort: xhigh
           sandbox: workspace-write
           safety-strategy: drop-sudo
-          codex-args: '["--full-auto"]'
 
       - name: Enforce translated MDX repair scope
         id: mdx_scope
@@ -506,7 +505,6 @@ jobs:
           effort: xhigh
           sandbox: workspace-write
           safety-strategy: drop-sudo
-          codex-args: '["--full-auto"]'
 
       - name: Enforce translated MDX repair scope (relay round 2)
         id: mdx_scope_2
@@ -566,7 +564,6 @@ jobs:
           effort: xhigh
           sandbox: workspace-write
           safety-strategy: drop-sudo
-          codex-args: '["--full-auto"]'
 
       - name: Enforce translated MDX repair scope (relay round 3)
         id: mdx_scope_3
@@ -626,7 +623,6 @@ jobs:
           effort: xhigh
           sandbox: workspace-write
           safety-strategy: drop-sudo
-          codex-args: '["--full-auto"]'
 
       - name: Enforce translated MDX repair scope (relay round 4)
         id: mdx_scope_4
