@@ -265,7 +265,7 @@ jobs:
         if: steps.stale.outputs.skip != 'true'
         uses: actions/setup-go@v7
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       - name: Install Codex CLI
         if: steps.stale.outputs.skip != 'true'
