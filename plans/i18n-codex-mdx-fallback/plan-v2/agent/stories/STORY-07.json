@@ -5,7 +5,7 @@
   "plan": "EPIC-I18N-MDX-CODEX-FALLBACK",
   "title": "黄金验收与线上复盘",
   "intent_version": 2,
-  "status": "blocked",
+  "status": "done",
   "blocked_by": [
     "STORY-01",
     "STORY-02",
@@ -28,22 +28,22 @@
     {
       "id": "AC-01",
       "criterion": "全部黄金案例在同一 acceptance commit 上有通过或带原因的失败证据。",
-      "passed": false
+      "passed": true
     },
     {
       "id": "AC-02",
       "criterion": "线上观察记录真实运行结果、失败样本、耗时和后续动作，且不泄露受控内容。",
-      "passed": false
+      "passed": true
     },
     {
       "id": "AC-03",
       "criterion": "复盘结论明确哪些问题交给增强后的现有 Codex action、哪些可由可选辅助稳定处理、哪些继续人工处理；不以不断增加自研规则为默认方向。",
-      "passed": false
+      "passed": true
     },
     {
       "id": "AC-04",
       "criterion": "计划、工作流文档和风险登记反映最新实验事实；未验证的细节仍保持待实验状态。",
-      "passed": false
+      "passed": true
     }
   ],
   "context": {
@@ -63,18 +63,24 @@
       "若黄金案例失败，保留证据并在本 Story 前插入修复 Story；不得降低判据。"
     ]
   },
-  "owner": "orchestrator-pi",
-  "blocker": "STORY-06 未完成",
-  "updated": "2026-09-04",
+  "owner": "native-worker-codex-6",
+  "blocker": null,
+  "updated": "2026-09-05",
   "handoff": {
-    "summary": "交接时记录 Story、清单计数、基线、命令/退出码、证据路径、Git 状态和下一 Story 输入。",
+    "summary": "STORY-07 完成（final_story）。黄金验收 GC-01..06：GC-01/02/04/05 pass；GC-03 pass（STORY-07 内补字面整篇删除断言，npm test 10/10）；GC-06 pass-with-conditions（canary 机制/演练全绿，持续线上观察窗按 D-08 挂账至 PR 合并后首轮真实发布）。线上复盘 postmortem：--full-auto 静默失效窗（08-05 pin 升级→08-27 修复落点，22 天）git log 取证；辅助均不纳入（D-09）；relay 2-4 轮/预算耗尽/live summary 为观察项。validator=delegate PATCH→补齐后抽验通过。验收 commit=5a6345abb8。",
     "verification": [
-      "最终 verification 必须列出 GC-01 至 GC-06、证据位置、固定分母和线上观察窗口。"
+      "pytest 158 passed（validator 独立复跑）",
+      "npm test 10/10（含 L40 整篇删除断言）",
+      "strict-mdx-oracle 回放 exit 1 + repeat 一致（validator 复跑，sha256 逐字节对齐 classification before_sha256）",
+      "single-entry/oracle-gate exit 0",
+      "gh run 33935656061 三 job success 复核"
     ],
-    "remaining": [
-      "继续 v1 Story 的剩余工作。"
+    "remaining": [],
+    "risks": [
+      "持续线上观察窗（D-08）：PR 合并后首轮真实发布的 canary-release-summary/R2 smoke/relay 2-4 轮现场证据",
+      "上游反哺：docs-mdx-repair.md 接力措辞 + --full-auto 旗标修正 + 生产静默失效窗影响面须上游日志核对",
+      "0.146.0 是否拒旗标未实验（postmortem 保守标注）"
     ],
-    "risks": [],
-    "next": "按迁移后的 frontier 继续。"
+    "next": "Epic 交付：PR #153 合并由用户决策；合并后观察窗按 D-08 产出首份现场证据闭环 Goal。"
   }
 }

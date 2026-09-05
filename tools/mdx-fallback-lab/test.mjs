@@ -37,6 +37,20 @@ test("default checker configuration fails closed", () => {
   assert.equal(checkContent("---\na: b\n---\nbody", "---\na: b\n---\nbody", null).result, "fail");
 });
 
+test("checker rejects a literal whole-file deletion and final outcome is not success", async () => {
+  const source = await fs.readFile(path.join(FIXTURE_ROOT, taxonomy.path), "utf8");
+  // A zero-byte whole-file deletion candidate must fail closed at the checker gate.
+  const empty = checkContent(source, "", thresholds);
+  assert.equal(empty.result, "fail");
+  assert.equal(empty.violations[0].code, "empty_output");
+  // "anthropic-empty-frontmatter" strips any source to frontmatter-only (zero body), so on the
+  // taxonomy fixture it drives a whole-page deletion candidate through the repair loop.
+  const result = await runFixture(taxonomy, { config, variant: "anthropic-empty-frontmatter" });
+  assert.equal(result.record.checker_result, "fail");
+  assert.notEqual(result.record.final_outcome, "success");
+  assert.ok(result.feedback.length >= 1);
+});
+
 test("enhanced mock repairs both real fixtures through strict parser", async () => {
   for (const fixture of [anthropic, taxonomy]) {
     const result = await runFixture(fixture, { config });

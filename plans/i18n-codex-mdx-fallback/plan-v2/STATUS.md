@@ -6,7 +6,7 @@
 
 ## 此刻的判断
 
-当前受阻。已验证 7 / 8 项计划结果。
+已完成。8 项计划结果均已验证。
 
 最近更新：2026-09-05。
 
@@ -24,7 +24,6 @@
 
 ## 需要关注
 
-- **黄金验收与线上复盘**：STORY-06 未完成
 - **实现本地修复闭环**：多错误页（1416:339 既有二次错误）的处理协议：仅修指定诊断 vs 多轮接力——STORY-03.1 用户决策点
 - **实现本地修复闭环**：300s 实测超时是否作为生产预算提案——STORY-03.1 用户决策点
 - **汇总可行性并等待用户决策**：真实模式下尚未出现第 2 轮及预算耗尽场景：该路径目前仅由离线 mock 测试覆盖（STORY-04/05 需保留该观察点）
@@ -39,6 +38,9 @@
 - **阶段化发布上线**：canary-release-summary live artifact 待首次 commit_locale=true 真实发布
 - **阶段化发布上线**：relay 第 2-4 轮/预算耗尽仅 mock 覆盖
 - **阶段化发布上线**：生产原 Repair 步 --full-auto 静默失效疑点需在上游 openclaw/openclaw 同步接力措辞与旗标修正
+- **黄金验收与线上复盘**：持续线上观察窗（D-08）：PR 合并后首轮真实发布的 canary-release-summary/R2 smoke/relay 2-4 轮现场证据
+- **黄金验收与线上复盘**：上游反哺：docs-mdx-repair.md 接力措辞 + --full-auto 旗标修正 + 生产静默失效窗影响面须上游日志核对
+- **黄金验收与线上复盘**：0.146.0 是否拒旗标未实验（postmortem 保守标注）
 
 ## 已经得到的结果
 
@@ -49,3 +51,4 @@
 - **接入翻译流水线**：STORY-04 完成。单一 codex-action@v1 入口增强为 ≤4 轮有界接力（Repair→Enforce scope→Recheck，轮 N+1 需 MAX_ATTEMPTS>=N+上轮 scope success+上轮 recheck failure 三重门控）；新增 .github/scripts/i18n/mdx_repair_relay.py decide/report（契约 §1 启动条件 not_run 四类、预算与辅助开关 fail-closed、内容快照、无阈值内容丢失守卫、repair_mode/rounds/顶层 error 三元组、changed paths sha256）；package_artifact 逐页 partial-success（不可救页排除+标记，成功页正常打包；基础设施错误整 shard fail-closed）；apply_artifacts finalizer 解释 failed_paths；docs-mdx-repair.md 更新接力措辞。validator=delegate 结论 CONTINUE。生产预算按 D-10 提高为单轮 600s（步级 timeout 12min），取代 D-09 的 300s 生产默认；300s 保留为实验实测基线。
 - **建立独立 CI 验证子流水线**：STORY-05 完成。新增 .github/workflows/mdx-repair-validation.yml（workflow_dispatch+workflow_call；real_codex 默认 false；auxiliary_mode 仅 none，非 none 运行时 fail-closed）+ .github/scripts/i18n/mdx_repair_validation.py（oracle-gate/single-entry/classify 三态：success/agent_failure/environment_failure，preflight 复用生产 provider_preflight 分类）+13 个结构/行为测试（pytest 132 passed）。offline job 零 secret（工具链 0.146.1+Node22+mdx3.1.1、全量测试、lab npm test、oracle gate、单入口断言）；real-codex-relay job 逐字节复刻生产接力（4×codex-action 12min、D-10 预算 600000×4、逐轮诊断落盘、artifact 先传后置红）。validator=delegate 结论 CONTINUE。
 - **阶段化发布上线**：STORY-06 完成。canary 开关（mdx_repair_enabled 默认 false=原失败路径逐步等价）/RELEASE gate（仅 success 放行，abort 先于发布）/发布摘要/R2 smoke（28273967200 教训）/回退演练入口全部落地；真实 canary 演练在生产仓库 runner 三轮迭代后全绿（run 33935656061：offline ✓、Real Codex relay ✓ classification=success frozen_fixtures_pass_strict_recheck、Translate canary 链 ✓ 单 locale 单页隔离、Finalize 按设计跳过）。pytest 158 passed；validator=delegate CONTINUE。三轮演练共发现并修复：①--full-auto 与 CLI 0.146.1 不兼容（8 处；并发现生产原 Repair 步同缺陷+continue-on-error 疑似静默失效——STORY-07 复盘核心输入）②source sha 竞态（钉 publish_ref commit 解决）③go 1.25→1.26 源仓库漂移 ④tsx dispatch 缺失。
+- **黄金验收与线上复盘**：STORY-07 完成（final_story）。黄金验收 GC-01..06：GC-01/02/04/05 pass；GC-03 pass（STORY-07 内补字面整篇删除断言，npm test 10/10）；GC-06 pass-with-conditions（canary 机制/演练全绿，持续线上观察窗按 D-08 挂账至 PR 合并后首轮真实发布）。线上复盘 postmortem：--full-auto 静默失效窗（08-05 pin 升级→08-27 修复落点，22 天）git log 取证；辅助均不纳入（D-09）；relay 2-4 轮/预算耗尽/live summary 为观察项。validator=delegate PATCH→补齐后抽验通过。验收 commit=5a6345abb8。
