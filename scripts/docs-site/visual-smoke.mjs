@@ -453,6 +453,44 @@ async function checkTocScrollspy() {
     || afterPjax.activeCount !== 1) {
     throw new Error(`toc scrollspy failed after PJAX navigation: ${JSON.stringify(afterPjax)}`);
   }
+
+  await page.evaluate(() => {
+    const link = document.createElement("a");
+    link.href = "/__elements#encoded-anchor%3A-target";
+    link.textContent = "Encoded anchor target";
+    link.dataset.encodedAnchorSmoke = "true";
+    document.querySelector(".doc")?.prepend(link);
+  });
+  await page.click("[data-encoded-anchor-smoke]");
+  await page.waitForURL("**/__elements#encoded-anchor%3A-target");
+  await page.waitForFunction(() => {
+    const target = document.getElementById(location.hash.slice(1));
+    const top = target?.getBoundingClientRect().top;
+    return top !== undefined && top >= 0 && top < innerHeight;
+  });
+  const encodedAnchor = await page.evaluate(() => {
+    const target = document.getElementById(location.hash.slice(1));
+    const active = [...document.querySelectorAll(".toc a.active")];
+    return {
+      activeCount: active.length,
+      activeHash: active[0]?.hash ?? null,
+      hash: location.hash,
+      pathname: location.pathname,
+      targetId: target?.id ?? null,
+      targetTop: target?.getBoundingClientRect().top ?? null,
+      viewportHeight: innerHeight,
+    };
+  });
+  if (encodedAnchor.pathname !== "/__elements"
+    || encodedAnchor.hash !== "#encoded-anchor%3A-target"
+    || encodedAnchor.targetId !== "encoded-anchor%3A-target"
+    || encodedAnchor.targetTop === null
+    || encodedAnchor.targetTop < 0
+    || encodedAnchor.targetTop >= encodedAnchor.viewportHeight
+    || encodedAnchor.activeCount !== 1
+    || encodedAnchor.activeHash !== encodedAnchor.hash) {
+    throw new Error(`encoded cross-page anchor failed: ${JSON.stringify(encodedAnchor)}`);
+  }
   await page.close();
 }
 
@@ -460,7 +498,7 @@ async function scrollToTocItem(page, index) {
   const expected = await page.evaluate((targetIndex) => {
     const links = [...document.querySelectorAll(".toc a")];
     const items = links
-      .map((link) => ({ hash: link.hash, id: decodeURIComponent(link.hash.slice(1)) }))
+      .map((link) => ({ hash: link.hash, id: link.hash.slice(1) }))
       .filter((item) => item.id && document.getElementById(item.id));
     const item = items[Math.min(targetIndex, items.length - 1)];
     document.getElementById(item?.id)?.scrollIntoView();
@@ -478,6 +516,69 @@ async function scrollToTocItem(page, index) {
       scrollY,
     };
   }, expected);
+}
+
+async function checkMobileToc(page) {
+  await page.goto(`${base}/releases/2026.8.1`, { waitUntil: "networkidle" });
+  const hiddenAtTop = await page.evaluate(() => ({
+    open: document.querySelector(".toc")?.hasAttribute("open"),
+    opacity: getComputedStyle(document.querySelector(".toc")).opacity,
+  }));
+  if (hiddenAtTop.open || hiddenAtTop.opacity !== "0") {
+    throw new Error(`mobile toc should stay hidden beside the page title: ${JSON.stringify(hiddenAtTop)}`);
+  }
+
+  await page.evaluate(() => {
+    const articleHeader = document.querySelector(".article-header")?.getBoundingClientRect();
+    scrollTo(0, (articleHeader?.bottom ?? 0) + scrollY + 20);
+  });
+  await page.waitForFunction(() => getComputedStyle(document.querySelector(".toc")).opacity === "1");
+  await page.click(".toc summary");
+  await page.screenshot({ path: path.join(artifacts, "release-mobile-toc.png"), fullPage: false });
+
+  const open = await page.evaluate(() => {
+    const rect = (selector) => document.querySelector(selector)?.getBoundingClientRect();
+    const summary = rect(".toc summary");
+    const nav = rect(".toc nav");
+    return {
+      backdrop: getComputedStyle(document.body, "::before").content,
+      bodyOverflow: getComputedStyle(document.body).overflow,
+      chatVisibility: getComputedStyle(document.querySelector(".docs-chat")).visibility,
+      nav: nav?.toJSON(),
+      navBackground: getComputedStyle(document.querySelector(".toc nav")).backgroundColor,
+      open: document.querySelector(".toc")?.hasAttribute("open"),
+      summary: summary?.toJSON(),
+      tocZ: Number(getComputedStyle(document.querySelector(".toc")).zIndex),
+      viewportHeight: innerHeight,
+      viewportWidth: innerWidth,
+    };
+  });
+  if (!open.open
+    || open.bodyOverflow !== "hidden"
+    || open.chatVisibility !== "hidden"
+    || open.backdrop === "none"
+    || open.tocZ < 100
+    || !open.nav
+    || !open.summary
+    || open.nav.left < 13
+    || open.nav.right > open.viewportWidth - 13
+    || open.nav.width < open.viewportWidth - 30
+    || open.nav.top < open.summary.bottom + 7
+    || open.nav.bottom > open.viewportHeight - 13
+    || open.navBackground.includes("/")) {
+    throw new Error(`mobile toc sheet failed: ${JSON.stringify(open)}`);
+  }
+
+  await page.keyboard.press("Escape");
+  const closed = await page.evaluate(() => ({
+    bodyOverflow: getComputedStyle(document.body).overflow,
+    chatVisibility: getComputedStyle(document.querySelector(".docs-chat")).visibility,
+    open: document.querySelector(".toc")?.hasAttribute("open"),
+  }));
+  if (closed.open || closed.bodyOverflow === "hidden" || closed.chatVisibility === "hidden") {
+    throw new Error(`mobile toc did not clean up after closing: ${JSON.stringify(closed)}`);
+  }
+  await page.goto(`${base}/__elements`, { waitUntil: "networkidle" });
 }
 
 async function checkMobile() {
@@ -520,6 +621,7 @@ async function checkMobile() {
     || geometry.stepInset < 0) {
     throw new Error(`mobile visual geometry failed: ${JSON.stringify(geometry)}`);
   }
+  await checkMobileToc(page);
   const mobileCardColumns = await page.evaluate(() => {
     const countColumns = (grid) => {
       const cards = [...grid.querySelectorAll(":scope > .oc-card")];
@@ -647,7 +749,7 @@ async function checkMobile() {
     throw new Error(`mobile menu did not close on Escape: ${JSON.stringify(closed)}`);
   }
   await page.goto(`${base}/channels/discord`, { waitUntil: "networkidle" });
-  await page.screenshot({ path: path.join(artifacts, "discord-mobile-dark.png"), fullPage: true });
+  await page.screenshot({ path: path.join(artifacts, "discord-mobile-dark.png"), fullPage: false });
   const discordOverflow = await page.evaluate(() => {
     const viewport = innerWidth;
     const longCode = [...document.querySelectorAll(".doc code")]
@@ -819,6 +921,10 @@ async function checkPageActions(page, label) {
     document.body.append(radiusProbe);
     const controlRadius = getComputedStyle(radiusProbe).borderTopLeftRadius;
     radiusProbe.remove();
+    const cornerRadiusScale = Number.parseFloat(
+      getComputedStyle(document.documentElement).getPropertyValue("--oc-corner-radius-scale"),
+    ) || 1;
+    const segmentRadius = `${Number.parseFloat(controlRadius) * cornerRadiusScale}px`;
     const primaryRightBorder = parseFloat(primaryStyle.borderRightWidth);
     const summaryLeftBorder = parseFloat(summaryStyle.borderLeftWidth);
     const seamDelta = summaryRect.left - primaryRect.right;
@@ -853,6 +959,7 @@ async function checkPageActions(page, label) {
         summaryStyle.borderBottomLeftRadius,
       ],
       controlRadius,
+      segmentRadius,
       whiteSpace: primaryStyle.whiteSpace,
       labelHeight: labelRect.height,
       sameLine: Math.abs(iconRect.top - labelRect.top) < 4,
@@ -871,8 +978,8 @@ async function checkPageActions(page, label) {
     || closed.seamDelta > 0
     || closed.seamDelta < -1
     || !closeEnough(closed.seamWidth, 1)
-    || closed.primaryRadii.join(" ") !== `${closed.controlRadius} 0px 0px ${closed.controlRadius}`
-    || closed.summaryRadii.join(" ") !== `0px ${closed.controlRadius} ${closed.controlRadius} 0px`
+    || closed.primaryRadii.join(" ") !== `${closed.segmentRadius} 0px 0px ${closed.segmentRadius}`
+    || closed.summaryRadii.join(" ") !== `0px ${closed.segmentRadius} ${closed.segmentRadius} 0px`
     || closed.whiteSpace !== "nowrap"
     || closed.labelHeight > closed.primaryHeight
     || !closed.sameLine

@@ -485,6 +485,7 @@ Notes:
 - Qualified success and failure items echo the normalized owner as `requestedOwnerHandle`; unqualified items omit that field.
 - Results are per item; one missing skill, owner-qualified skill, or version does not fail the whole response.
 - The response is security-only. It does not include Skill Card data, generated card status, artifact file lists, or detailed scanner payloads.
+- Successful items include top-level `overview`, the canonical audit-page text composed from the ClawScan summary and guidance. Install clients may present this text without reconstructing it from scanner fields.
 - `security.signals` contains status-level supporting evidence only; use `/scan` or the ClawHub security-audit page for full scanner details.
 - `security.signals.dependencyRegistry` is retained for v1 response compatibility, but the dependency registry existence scanner is retired and this key is always `null`.
 - Skill Card absence does not affect this endpoint's `ok`, `decision`, or `reasons`; clients should read installed `skill-card.md` locally when they need card content.
@@ -512,6 +513,7 @@ Response:
       "checkedAt": 0,
       "skillUrl": "https://clawhub.ai/steipete/skills/gifgrep",
       "securityAuditUrl": "https://clawhub.ai/steipete/skills/gifgrep/security-audit?version=1.2.3",
+      "overview": "ClawScan found no material security concerns.\n\nUse least-privileged credentials when configuring this skill.",
       "security": {
         "status": "clean",
         "passed": true,
@@ -637,6 +639,12 @@ On the unified `/api/v1/packages` endpoint it is plugin-only; use
 `/api/v1/skills?sort=trending` for the skill catalog.
 
 Legacy aliases are not accepted as stored or author-declared category values.
+
+### `GET /api/v1/plugins/categories`
+
+Returns the canonical plugin discovery taxonomy in display order. Each category
+contains `slug`, `label`, `description`, a bare Lucide `icon` key, and numeric
+`order`.
 
 ### `GET /api/v1/skills/export`
 
@@ -807,6 +815,8 @@ Response:
 
 ```json
 {
+  "overview": "ClawScan found no material security concerns.\n\nUse least-privileged credentials when configuring this plugin.",
+  "securityAuditUrl": "https://clawhub.ai/openclaw/plugins/example-plugin/security-audit?version=1.2.3",
   "package": {
     "name": "@openclaw/example-plugin",
     "displayName": "Example Plugin",
@@ -835,6 +845,10 @@ Response:
 
 Response fields:
 
+- `overview` is the canonical summary-and-guidance text shown by the package
+  security-audit page. Install clients may present it without reconstructing
+  audit text from scanner fields.
+- `securityAuditUrl` links to the exact release's package security-audit page.
 - `package.name`, `package.displayName`, and `package.family` identify the
   resolved registry package.
 - `release.releaseId`, `release.version`, and `release.createdAt` identify the
@@ -1370,9 +1384,11 @@ Publishes a code-plugin or bundle-plugin release.
 - Use either `files` or `clawpack`, never both in the same request.
 - JSON bodies and caller-supplied `payload.files` / `payload.artifact`
   metadata are rejected.
-- Direct multipart publish requests are capped at 18MB. ClawPack tarballs may
-  use the upload-url flow up to the 120MB tarball cap.
-- Optional payload field: `ownerHandle`. When present, only admins may publish on behalf of that owner.
+- Direct multipart publish requests are capped at 4MB because the public API is
+  served through Vercel functions, which reject larger request bodies with
+  `413` before ClawHub sees them. Larger ClawPack tarballs must use the
+  upload-url flow, up to the 120MB tarball cap.
+- Optional payload field: `ownerHandle`. The actor must have publish access to the selected publisher.
 
 Validation highlights:
 
@@ -1386,6 +1402,26 @@ Validation highlights:
 - Only the `openclaw` org publisher and current `openclaw` org members'
   personal publishers may publish to the `official` channel.
 - On-behalf publishes still validate official-channel eligibility against the target owner account.
+
+### `POST /api/v1/publish/attempts/{id}/recover`
+
+Recover a failed staged OpenClaw plugin release with a normal user Bearer token
+and current package publish access. The only accepted JSON field is:
+
+```json
+{ "manualOverrideReason": "Retry the retained artifacts after workflow failure" }
+```
+
+The reason must contain 1–500 characters after trimming. A new successor returns
+`202`; an exact authorized replay returns `200` and its existing outcome.
+Responses contain `ok`, `attemptId`, `recoveredFromAttemptId`, `packageId`,
+`releaseId`, `name`, `version`, `status`, `publicationStatus`, and `reused`.
+Follow the successor with `GET /api/v1/publish/attempts/{id}` using the same user
+token. Pending is not published; fresh security checks and current authorization
+must pass before the retained release becomes public.
+
+Invalid bodies return `400`, invalid credentials `401`, undisclosed or missing
+attempts `404`, and conflicting or ineligible recovery state `409`.
 
 ### `DELETE /api/v1/skills/{slug}` / `POST /api/v1/skills/{slug}/undelete`
 
@@ -1640,7 +1676,7 @@ Still supported for older CLI versions:
 - `GET /api/cli/whoami`
 - `POST /api/cli/upload-url`
 - `POST /api/cli/publish`
-- `POST /api/cli/telemetry/install`
+- `POST /api/cli/telemetry/install` — also used by the current CLI for install events.
 - `POST /api/cli/skill/delete`
 - `POST /api/cli/skill/undelete`
 

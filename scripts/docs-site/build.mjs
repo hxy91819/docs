@@ -6,17 +6,22 @@ import { Worker } from "node:worker_threads";
 
 import { ignoredDocDirs, ignoredDocFiles, localeFlags, localeLabels, mintlifyLocaleToDir, rtlLocales } from "./config.mjs";
 import { siteCss, siteJs } from "./assets.mjs";
+import { chromeStringsForLocale } from "./chrome-strings.mjs";
 import { createMarkdownRenderer, renderMdxish } from "./mdx-ish.mjs";
 import { editSourceUrlForPage, frontmatterSourcePath, readSourceMetadata } from "./edit-source.mjs";
 import { elementsFixture } from "./elements-fixture.mjs";
-import { parseFrontmatter } from "./frontmatter.mjs";
+import { parseFrontmatter } from "../../.openclaw-sync/lib/docs-markdown.mjs";
 import { renderPageOgSvg } from "./og-card-template.mjs";
+import { resolveRedirects } from "../../.openclaw-sync/lib/docs-redirects.mjs";
 
 const root = process.cwd();
 const docsDir = path.join(root, "docs");
 const siteAssetsDir = path.join(root, "scripts", "docs-site");
 const shellPublicAssetsDir = path.join(siteAssetsDir, "assets");
 const outDir = path.join(root, "dist", "docs-site");
+const redirectMetadataPath = path.join(root, "dist", "docs-markdown-redirects.json");
+// Preview builds skip redirects, so never let an earlier full build's records survive.
+fs.rmSync(redirectMetadataPath, { force: true });
 const config = JSON.parse(fs.readFileSync(path.join(docsDir, "docs.json"), "utf8"));
 const sourceMetadata = readSourceMetadata(root);
 const md = createMarkdownRenderer();
@@ -123,10 +128,13 @@ function parseOptionalPositiveInt(value, name) {
 
 function collectPages(localeList) {
   const result = [];
+  const localeRoots = new Set(localeList.filter((locale) => !locale.root).map((locale) => locale.code));
   for (const locale of localeList) {
     const base = locale.root ? docsDir : path.join(docsDir, locale.code);
     for (const file of walkDocs(base)) {
       const rel = path.relative(base, file).replaceAll(path.sep, "/");
+      // Only the English owner excludes foreign roots; walkDocs remains an all-source traversal.
+      if (locale.root && localeRoots.has(rel.split("/")[0])) continue;
       if (ignoredDocFiles.has(rel)) continue;
       const raw = fs.readFileSync(file, "utf8");
       const parsed = parseFrontmatter(raw);
@@ -249,7 +257,7 @@ function writePage(page) {
   const activeTab = activeTabTitle(nav, page.slug);
   const prev = activeIndex > 0 ? flat[activeIndex - 1] : null;
   const next = activeIndex >= 0 && activeIndex < flat.length - 1 ? flat[activeIndex + 1] : null;
-  const html = rewriteInternalUrls(renderMdxish(expandSnippets(page.body, page.file), md), page.locale);
+  const html = rewriteInternalUrls(renderMdxish(page.raw, md, { sourceFile: page.file, root, pageRoute: pageRoute(page) }), page.locale);
   const toc = tableOfContents(html);
   const outPath = path.join(outDir, pageRoute(page).replace(/^\//, ""), "index.html");
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
@@ -308,8 +316,8 @@ ${canonicalUrl ? `<meta property="og:url" content="${escapeAttr(canonicalUrl)}">
 ${siteHeader(page, nav, activeTab)}
 <div class="doc-shell">
 ${sidebar(page, nav, activeTab)}
-<main class="main" id="main">
-<article class="article">
+<div class="main">
+<main class="article" id="main">
 <header class="article-header">
 ${articleMeta(page, nav)}
 ${page.hidden ? "" : pageMarkdownScript(page)}
@@ -321,10 +329,11 @@ ${pageSearchMetadata(page, nav)}
 <div class="doc"${page.hidden ? ' data-pagefind-ignore' : ' data-pagefind-body'}>${html}</div>
 ${page.hidden ? "" : pageFeedback(page)}
 ${pager(prev, next)}
-</article>
-${tocHtml(toc)}
 </main>
+${tocHtml(toc, page.locale)}
 </div>
+</div>
+${communityInvite(page.locale)}
 ${siteFooter()}
 ${searchModal()}
 ${page.hidden ? "" : chatWidget()}
@@ -382,6 +391,27 @@ function sidebar(page, nav, activeTab) {
 <details class="mobile-section-switcher"><summary><span class="mobile-section-copy"><span class="mobile-section-label">Section</span><strong>${escapeHtml(currentTab?.title ?? "Docs")}</strong></span><span class="mobile-section-chevron" aria-hidden="true">${icon("chevron-down")}</span></summary><nav class="mobile-tabs" aria-label="Docs sections">${mobileTabs}</nav></details>
 <p class="sidebar-section-label">In this section</p>
 <nav aria-label="${escapeAttr(`${currentTab?.title ?? "Docs"} pages`)}">${groups.map((group) => navGroupHtml(page, group)).join("")}</nav>
+</aside>`;
+}
+
+// Body-level sibling of .doc-shell, never a child of .sidebar: the narrow-layout drawer is
+// transformed and masked, which would make it the containing block for this position:fixed card
+// and clip it. CSS floats it over wide layouts and docks it flush to the drawer bottom on narrow
+// ones, so one element and one dismissal serve both. Ships hidden so a browser that already
+// dismissed it never flashes the card; the shell script reveals it only when local storage is
+// readable and holds no dismissal.
+function communityInvite(locale) {
+  const strings = chromeStringsForLocale(locale);
+  return `<aside class="community-invite" aria-label="${escapeAttr(strings.communityLabel)}" hidden>
+<div class="community-invite__header">
+<img class="community-invite__art" src="${publicPath("/assets/discord-invite.webp")}" alt="${escapeAttr(strings.communityImageAlt)}" width="1024" height="538" loading="lazy" decoding="async">
+<button class="community-invite__close" type="button" data-community-invite-dismiss aria-label="${escapeAttr(strings.communityDismissLabel)}">${icon("x")}</button>
+</div>
+<div class="community-invite__body">
+<h2 class="community-invite__title">${escapeHtml(strings.communityTitle)}</h2>
+<p class="community-invite__text">${escapeHtml(strings.communityBody)}</p>
+<a class="community-invite__cta" href="https://discord.com/invite/clawd" target="_blank" rel="noopener noreferrer">${icon("discord")}<span>${escapeHtml(strings.communityCta)}</span></a>
+</div>
 </aside>`;
 }
 
@@ -554,9 +584,10 @@ function tableOfContents(html) {
     .slice(0, 24);
 }
 
-function tocHtml(items) {
+function tocHtml(items, locale) {
   if (!items.length) return "";
-  return `<details class="toc" aria-label="On this page" open><summary><span>On this page</span></summary><h2>On this page</h2><nav>${items.map((item) => `<a class="toc-l${item.level}" href="#${escapeAttr(item.id)}">${escapeHtml(item.title)}</a>`).join("")}</nav></details>`;
+  const label = chromeStringsForLocale(locale).onThisPage;
+  return `<details class="toc" aria-label="${escapeAttr(label)}" open><summary><span>${escapeHtml(label)}</span></summary><h2>${escapeHtml(label)}</h2><nav>${items.map((item) => `<a class="toc-l${item.level}" href="#${escapeAttr(item.id)}">${escapeHtml(item.title)}</a>`).join("")}</nav></details>`;
 }
 
 function pager(prev, next) {
@@ -719,37 +750,24 @@ function chatWidget() {
 }
 
 function writeRedirects() {
-  for (const redirect of config.redirects ?? []) {
-    const source = cleanPath(redirect.source);
-    const dest = cleanPath(redirect.destination);
-    writeRedirectVariants(source, publicPath(dest));
-    for (const locale of locales) {
-      if (locale.root) continue;
-      writeRedirectVariants(`/${locale.code}${source}`, localizedRedirectDestination(locale.code, dest));
-    }
+  const records = resolveRedirects({
+    redirects: config.redirects ?? [],
+    pages: pages.map((page) => ({ route: pageRoute(page), markdownRoute: pageMarkdownRoute(page) })),
+    localeCodes,
+    knownLocales: Object.keys(localeLabels),
+    prefixes: [...new Set([basePath, legacyBasePath].filter(Boolean))],
+    publicPath,
+  });
+  const metadata = {};
+  for (const { source, destination, markdownTarget } of records) {
+    const target = path.resolve(outDir, source.slice(1), "index.html");
+    if (!target.startsWith(`${outDir}${path.sep}`)) throw new Error(`Redirect escapes output directory: ${source}`);
+    if (fs.existsSync(target)) continue;
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, redirectHtml(destination), "utf8");
+    if (markdownTarget) metadata[path.relative(outDir, target).split(path.sep).join("/")] = markdownTarget;
   }
-}
-
-function writeRedirectVariants(source, dest) {
-  writeRedirectFile(source, dest);
-  for (const prefix of new Set([basePath, legacyBasePath].filter(Boolean))) {
-    writeRedirectFile(`${prefix}${source}`, dest);
-  }
-}
-
-function localizedRedirectDestination(locale, dest) {
-  const [pathname, hash] = dest.split("#");
-  const slug = normalizeSlug(pathname.replace(/^\/+|\/+$/g, ""));
-  const page = allPageByKey.get(pageKey(locale, slug));
-  if (!page) return publicPath(dest);
-  return publicPath(`${pageRoute(page)}${hash ? `#${hash}` : ""}`);
-}
-
-function writeRedirectFile(source, dest) {
-  const target = path.join(outDir, source.replace(/^\//, ""), "index.html");
-  if (fs.existsSync(target)) return;
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, redirectHtml(dest), "utf8");
+  fs.writeFileSync(redirectMetadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
 }
 
 function redirectHtml(dest) {
@@ -769,25 +787,6 @@ function componentLabel(name, attrs) {
   const parsed = Object.fromEntries([...String(attrs).matchAll(/([A-Za-z0-9_-]+)=(?:"([^"]*)"|'([^']*)')/g)].map((match) => [match[1], match[2] ?? match[3] ?? ""]));
   const label = parsed.title ?? parsed.name ?? parsed.href ?? "";
   return label ? `\n${label}\n` : `\n${name}\n`;
-}
-
-function expandSnippets(input, sourceFile, seen = new Set()) {
-  return input.replace(/<Snippet\b([^>]*)\/>/g, (_, rawAttrs) => {
-    const attrs = parseSimpleAttrs(rawAttrs);
-    const ref = attrs.file ?? attrs.src;
-    if (!ref) return "";
-    const target = path.resolve(path.dirname(sourceFile), ref);
-    if (!target.startsWith(root) || seen.has(target) || !fs.existsSync(target)) return "";
-    const nextSeen = new Set(seen);
-    nextSeen.add(target);
-    const parsed = parseFrontmatter(fs.readFileSync(target, "utf8"));
-    return `\n${expandSnippets(parsed.content, target, nextSeen).trim()}\n`;
-  });
-}
-
-function parseSimpleAttrs(rawAttrs) {
-  return Object.fromEntries([...String(rawAttrs).matchAll(/([A-Za-z0-9_-]+)=(?:"([^"]*)"|'([^']*)'|\{([^}]*)\}|([^\s>]+))/g)]
-    .map((match) => [match[1], match[2] ?? match[3] ?? match[4] ?? match[5] ?? ""]));
 }
 
 async function renderPageOgCards() {
@@ -1019,12 +1018,6 @@ function fileSlug(rel) {
 
 function normalizeSlug(value) {
   return value.replace(/\/index$/, "") || "index";
-}
-
-function cleanPath(value) {
-  const [pathname, hash = ""] = String(value).split("#");
-  const cleaned = pathname.replace(/\/$/, "") || "/";
-  return hash ? `${cleaned}#${hash}` : cleaned;
 }
 
 function publicPath(value) {

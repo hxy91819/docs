@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -10,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,9 +42,6 @@ pending = load_module("build_pending_manifest")
 clear_pending_locale_outputs = load_module("clear_pending_locale_outputs")
 package_artifact = load_module("package_artifact")
 mdx_repair_scope = load_module("mdx_repair_scope")
-mdx_repair_relay = load_module("mdx_repair_relay")
-mdx_repair_validation = load_module("mdx_repair_validation")
-mdx_repair_canary = load_module("mdx_repair_canary")
 apply_artifacts = load_module("apply_artifacts")
 merge_artifact_roots = load_module("merge_artifact_roots")
 read_source_metadata = load_module("read_source_metadata")
@@ -81,7 +79,7 @@ def env(values: dict[str, str]):
 
 
 def run_git(repo: Path, *args: str) -> str:
-    result = subprocess.run(["git", *args], cwd=repo, check=True, text=True, stdout=subprocess.PIPE)
+    result = subprocess.run(["git", *args], cwd=repo, check=True, text=True, stdout=subprocess.PIPE, timeout=120)
     return result.stdout
 
 
@@ -89,15 +87,12 @@ def init_repo(repo: Path) -> None:
     run_git(repo, "init", "-b", "main")
     run_git(repo, "config", "user.name", "Test")
     run_git(repo, "config", "user.email", "test@example.com")
+    run_git(repo, "config", "commit.gpgsign", "false")
 
 
 class I18NScriptTests(unittest.TestCase):
     def test_translate_workflows_call_existing_scripts_without_inline_python_or_node_heredocs(self) -> None:
-        # The MDX repair validation sub-pipeline (STORY-05) joins the same
-        # audit: no inline interpreter heredocs, and every i18n control-plane
-        # script it uses is called through the recognized patterns.
-        validation_workflow = REPO_ROOT / ".github/workflows/mdx-repair-validation.yml"
-        workflows = sorted(set((REPO_ROOT / ".github/workflows").glob("translate-*.yml")) | {validation_workflow})
+        workflows = sorted((REPO_ROOT / ".github/workflows").glob("translate-*.yml"))
         self.assertTrue(workflows)
 
         called_scripts: set[Path] = set()
@@ -152,13 +147,7 @@ class I18NScriptTests(unittest.TestCase):
             stdout=subprocess.PIPE,
         ).stdout.splitlines()
         changed_paths = changed + untracked
-        allowed_docs_paths = {
-            "docs/.i18n/translation-workflow.md",
-            "docs/.i18n/translation-ci-temporary-todo.md",
-            # STORY-06 canary operations manual (repo-owned control-plane doc).
-            "docs/.i18n/mdx-repair-canary-operations.md",
-        }
-        allowed_openclaw_sync_paths = {".openclaw-sync/docs-mdx-repair.md"}
+        allowed_docs_paths = {"docs/.i18n/translation-workflow.md", "docs/.i18n/translation-ci-temporary-todo.md"}
         generated_docs = [
             path
             for path in changed_paths
@@ -166,7 +155,6 @@ class I18NScriptTests(unittest.TestCase):
             or path == "docs/docs.json"
             or (
                 path.startswith(".openclaw-sync/")
-                and path not in allowed_openclaw_sync_paths
                 and not path.startswith(".openclaw-sync/workflow-shell-check/")
             )
         ]
@@ -186,9 +174,10 @@ class I18NScriptTests(unittest.TestCase):
 
     def test_shell_check_installs_mdx_dependency_before_regressions(self) -> None:
         text = (REPO_ROOT / ".github/workflows/translate-shell-check-reusable.yml").read_text(encoding="utf-8")
-        install = "npm install --no-save --package-lock=false @mdx-js/mdx@3.1.1"
+        install = "npm install --no-save --package-lock=false @mdx-js/mdx@3.1.1 tsx@4.23.13"
         self.assertIn(install, text)
         self.assertLess(text.index(install), text.index("Run i18n control-plane regressions"))
+        self.assertRegex(text, r'pull_request:\n    paths:\n      - "\.github/scripts/i18n/\*\*"\n      - "\.github/workflows/translate-\*\.yml"')
 
     def test_budget_check_accepts_current_full_batches_and_rejects_worker_over_budget(self) -> None:
         budget = budget_check.validate_budget(REPO_ROOT / ".github/workflows/translate-all.yml")
@@ -450,8 +439,25 @@ class I18NScriptTests(unittest.TestCase):
         full = (REPO_ROOT / ".github/workflows/translate-all.yml").read_text(encoding="utf-8")
         incremental = (REPO_ROOT / ".github/workflows/translate-incremental.yml").read_text(encoding="utf-8")
 
-        self.assertIn("npm install -g @openai/codex@0.146.1", reusable)
+        # The Codex CLI pin has one source of truth: toolchain.json. Workflows
+        # must resolve it at runtime; no workflow may embed a version literal.
+        toolchain = json.loads((REPO_ROOT / ".github/scripts/i18n/toolchain.json").read_text(encoding="utf-8"))
+        self.assertRegex(str(toolchain["codex_cli"]), r"^\d+\.\d+\.\d+$")
+        self.assertRegex(str(toolchain["go_version"]), r"^\d+\.\d+$")
+        self.assertIn('CODEX_CLI_VERSION="$(jq -r .codex_cli "${I18N_SCRIPT_DIR}/toolchain.json")"', reusable)
+        self.assertIn('GO_VERSION="$(jq -r .go_version "${I18N_SCRIPT_DIR}/toolchain.json")"', reusable)
+        self.assertIn('npm install -g "@openai/codex@${CODEX_CLI_VERSION}"', reusable)
+        self.assertIn("sparse-checkout-cone-mode: false", full)
+        for workflow_path in sorted((REPO_ROOT / ".github/workflows").glob("translate-*.yml")):
+            self.assertIsNone(
+                re.search(r"@openai/codex@\d", workflow_path.read_text(encoding="utf-8")),
+                f"{workflow_path.name} must resolve the Codex CLI version from toolchain.json",
+            )
+
         self.assertIn("effort: xhigh", reusable)
+        self.assertIn('go-version: "${{ env.GO_VERSION }}"', reusable)
+        self.assertNotIn('codex-args:', reusable)
+        self.assertNotIn('--full-auto', reusable)
         self.assertNotIn("effort: max", reusable)
         self.assertEqual(1, full.count('thinking_effort: "xhigh"'))
         self.assertEqual(6, full.count("thinking_effort: ${{ inputs.translation_effort || 'xhigh' }}"))
@@ -473,6 +479,43 @@ class I18NScriptTests(unittest.TestCase):
         self.assertEqual("0", prepare.default_cooldown("full", "schedule", "", "3600"))
         self.assertFalse(prepare.incremental_should_translate_paths(["docs/.i18n/glossary.fr.json"]))
         self.assertTrue(prepare.incremental_should_translate_paths(["docs/.i18n/glossary.fr.json", "docs/guide/setup.mdx"]))
+
+    def test_prepare_reads_metadata_from_the_once_resolved_revision(self) -> None:
+        for ref in ("HEAD", "refs/remotes/origin/main"):
+            with self.subTest(ref=ref), patch.object(prepare, "run_git", side_effect=[
+                "resolved-sha\n", '{"repository":"openclaw/openclaw","sha":"source-a"}',
+            ]) as git:
+                self.assertEqual(prepare.MainState("resolved-sha", "openclaw/openclaw", "source-a"), prepare.read_source_state(ref))
+                self.assertEqual([
+                    (["rev-parse", ref],),
+                    (["show", "resolved-sha:.openclaw-sync/source.json"],),
+                ], [call.args for call in git.call_args_list])
+
+    def test_prepare_translation_preserves_debounce_cap_and_push_filter(self) -> None:
+        first = prepare.MainState("publish-a", "openclaw/openclaw", "source-a")
+        newer = prepare.MainState("publish-b", "openclaw/openclaw", "source-b")
+        for mode, states, cap, translate in (
+            ("full", [first, first], "20", True),
+            ("full", [first, newer], "10", True),
+            ("incremental", [first, newer, newer, newer], "20", True),
+            ("incremental", [first, first], "20", False),
+        ):
+            with self.subTest(mode=mode, states=states, translate=translate), patch.dict(os.environ, {
+                "EVENT_NAME": "push", "BEFORE_SHA": "before", "REQUESTED_COOLDOWN_SECONDS": "10",
+                "DEFAULT_MAX_WAIT_SECONDS": cap,
+            }, clear=True), patch.object(prepare, "read_main_state", side_effect=states) as read, \
+                    patch.object(prepare, "sleep_with_heartbeat") as sleep, \
+                    patch.object(prepare, "incremental_should_translate", return_value=translate) as changed:
+                result = prepare.prepare(mode, "Fixture preparation")
+                self.assertEqual(states[-1].publish_ref, result["publish_ref"])
+                self.assertEqual(states[-1].source_sha, result["source_sha"])
+                self.assertEqual(str(translate).lower(), result["should_translate"])
+                self.assertEqual(len(states), read.call_count)
+                self.assertEqual([(10,)] * (len(states) // 2), [call.args for call in sleep.call_args_list])
+                if mode == "incremental":
+                    changed.assert_called_once_with("before", states[-1].publish_ref)
+                else:
+                    changed.assert_not_called()
 
     def test_incremental_workflow_schedules_all_expected_finalizer_locales(self) -> None:
         text = (REPO_ROOT / ".github/workflows/translate-incremental.yml").read_text(encoding="utf-8")
@@ -497,17 +540,14 @@ class I18NScriptTests(unittest.TestCase):
 
         self.assertRegex(text, r"group: docs-i18n-incremental\s+(?:#[^\n]*\n\s*)*cancel-in-progress: false")
 
-    def test_locale_like_docs_dirs_are_supported_and_excluded_from_incremental_triggers(self) -> None:
+    def test_marked_locale_dirs_are_supported_and_excluded_from_incremental_triggers(self) -> None:
         text = (REPO_ROOT / ".github/workflows/translate-incremental.yml").read_text(encoding="utf-8")
-        docs_dirs = {path.name for path in (REPO_ROOT / "docs").iterdir() if path.is_dir()}
+        marked_locale_dirs = {path.name for path in (REPO_ROOT / "docs").iterdir() if (path / ".i18n/README.md").is_file()}
         supported_locales = {locale.locale for locale in translation_plan.all_locales()}
         excluded_dirs = set(re.findall(r'!\s*docs/([^/]+)/\*\*', text))
 
-        # Locale output directories use short BCP47 tags. Treating only this
-        # shape as locale-like avoids false positives such as docs/web.
-        locale_like_dirs = {name for name in docs_dirs if re.fullmatch(r"[a-z]{2}(?:-[A-Z]{2})?", name)}
-
-        self.assertEqual(set(), locale_like_dirs - supported_locales)
+        # Locale markers identify generated trees; short English roots such as ci are valid sources.
+        self.assertEqual(set(), marked_locale_dirs - supported_locales)
         self.assertEqual(set(), supported_locales - excluded_dirs)
 
     def test_supported_locale_dirs_are_never_source_docs_without_markers(self) -> None:
@@ -515,6 +555,8 @@ class I18NScriptTests(unittest.TestCase):
             docs = Path(tmp) / "docs"
             docs.mkdir()
             (docs / "index.md").write_text("# Index\n", encoding="utf-8")
+            (docs / "ci").mkdir()
+            (docs / "ci/pipeline.md").write_text("# English CI docs\n", encoding="utf-8")
             for locale in translation_plan.all_locales():
                 locale_dir = docs / locale.locale
                 locale_dir.mkdir()
@@ -531,9 +573,9 @@ class I18NScriptTests(unittest.TestCase):
                 shard_total=1,
             )
 
-            self.assertEqual(1, incremental["source_doc_count"])
-            self.assertEqual(1, pending_result.all_count)
-            self.assertEqual(1, pending_result.total_pending_count)
+            self.assertEqual(2, incremental["source_doc_count"])
+            self.assertEqual(2, pending_result.all_count)
+            self.assertEqual(2, pending_result.total_pending_count)
 
     def test_full_plan_all_uses_canary_and_small_batches(self) -> None:
         result = plan_full.plan_full("all", 4, FIXTURES / "pending-docs" / "docs")
@@ -848,15 +890,48 @@ class I18NScriptTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertGreaterEqual(payload["max_output_tokens"], 16)
 
+    def test_provider_preflight_private_selection_and_availability_fallback(self) -> None:
+        cases = [
+            (200, {}, ["private-primary"], "primary"),
+            (404, {"code": "model_not_found"}, ["private-primary", "private-fallback"], "fallback"),
+            (403, {"param": "model", "code": "permission_denied"}, ["private-primary", "private-fallback"], "fallback"),
+            (401, {}, ["private-primary"], None),
+            (403, {"code": "permission_denied"}, ["private-primary"], None),
+            (404, {}, ["private-primary"], None),
+            (429, {"code": "insufficient_quota"}, ["private-primary"], None),
+            (500, {}, ["private-primary"], None),
+        ]
+        for status, error, expected_models, slot in cases:
+            with self.subTest(status=status, error=error), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / "output"
+                body = json.dumps({"error": {**error, "message": "private-primary private-fallback"}})
+                responses = [provider_preflight.ApiResponse(status, body), provider_preflight.ApiResponse(200, "{}")]
+                stdout = io.StringIO()
+                with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "GITHUB_OUTPUT": str(output)}), patch.object(provider_preflight, "openai_probe_request", side_effect=responses) as probe, redirect_stdout(stdout):
+                    if slot:
+                        provider_preflight.provider_preflight("openai", "private-primary", 30, fallback_model="private-fallback")
+                    else:
+                        with self.assertRaises(SystemExit) as failure:
+                            provider_preflight.provider_preflight("openai", "private-primary", 30, fallback_model="private-fallback")
+                        stdout.write(str(failure.exception))
+                self.assertEqual(expected_models, [call.args[0] for call in probe.call_args_list])
+                public_output = stdout.getvalue() + output.read_text()
+                for identifier in ("private-primary", "private-fallback"):
+                    self.assertNotIn(identifier, public_output)
+                if slot:
+                    self.assertIn(f"model_slot={slot}", output.read_text())
+
     def test_read_source_metadata_validates_requested_sha_and_outputs_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source_json = Path(tmp) / "source.json"
             source_json.write_text('{"repository":"openclaw/openclaw","sha":"source-a"}\n', encoding="utf-8")
-            metadata = read_source_metadata.read_source_metadata(source_json, "source-a")
+            metadata = read_source_metadata.read_source_metadata(source_json, "source-a", "openclaw/openclaw")
             self.assertEqual("openclaw/openclaw", metadata.repository)
             self.assertEqual("source-a", metadata.sha)
             with self.assertRaises(SystemExit):
                 read_source_metadata.read_source_metadata(source_json, "other-source")
+            with self.assertRaises(SystemExit):
+                read_source_metadata.read_source_metadata(source_json, "source-a", "other/repository")
 
     def test_prune_stale_locale_pages_removes_only_pages_without_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -866,12 +941,20 @@ class I18NScriptTests(unittest.TestCase):
             (docs / "index.md").write_text("# Index\n", encoding="utf-8")
             (docs / "fr/index.md").write_text("# Index FR\n", encoding="utf-8")
             (docs / "fr/old/nested/page.md").write_text("# Old\n", encoding="utf-8")
+            (docs / "fr/unrelated-empty").mkdir()
 
-            removed = prune_stale_locale_pages.prune_stale_locale_pages(docs, "fr")
+            args = [sys.executable, str(SCRIPT_DIR / "prune_stale_locale_pages.py"), "--docs-root", str(docs), "--locale", "fr"]
+            before = self._docs_bytes(Path(tmp))
+            empty = subprocess.run([*args, "--source-path="], text=True, capture_output=True, timeout=30)
+            self.assertNotEqual(0, empty.returncode)
+            self.assertEqual(before, self._docs_bytes(Path(tmp)))
+            result = subprocess.run(args, text=True, capture_output=True, timeout=30)
 
-            self.assertEqual(1, removed)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("removed stale locale pages: 1", result.stdout)
             self.assertTrue((docs / "fr/index.md").exists())
             self.assertFalse((docs / "fr/old").exists())
+            self.assertFalse((docs / "fr/unrelated-empty").exists())
 
     def test_pending_manifest_filters_locale_generated_and_shards_pending_docs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -925,24 +1008,30 @@ class I18NScriptTests(unittest.TestCase):
             shutil.copytree(FIXTURES / "pending-docs" / "docs", tmp_path / "docs")
             source = tmp_path / "docs/index.md"
             digest = hashlib.sha256(source.read_bytes()).hexdigest()
-            (tmp_path / "docs/fr/index.md").write_text(
-                f"---\nx-i18n:\n  source_hash: {digest}\n---\n\n# Index FR\n",
-                encoding="utf-8",
-            )
-
-            result = pending.build_pending_manifest(
-                docs_root=tmp_path / "docs",
-                openclaw_sync_dir=tmp_path / ".openclaw-sync",
-                locale="fr",
-                locale_slug="fr",
-                mode="incremental",
-                shard_index=0,
-                shard_total=1,
-            )
-
-            self.assertEqual(2, result.all_count)
-            self.assertEqual(1, result.total_pending_count)
-            self.assertTrue(result.shard_files[0].as_posix().endswith("/docs/guide/setup.mdx"))
+            for metadata, body, needs_refresh in (
+                ("", "# Index FR\n", False),
+                ("  model: retired-model\n", "# Index FR\n", True),
+                ("  provider: retired-provider\n", "# Index FR\n", True),
+                ("", "# Index FR\n```yaml\nx-i18n:\n  model: example\n```\n", False),
+            ):
+                with self.subTest(metadata=metadata, body=body):
+                    (tmp_path / "docs/fr/index.md").write_text(
+                        f"---\nx-i18n:\n  source_hash: {digest}\n{metadata}---\n\n{body}",
+                        encoding="utf-8",
+                    )
+                    result = pending.build_pending_manifest(
+                        docs_root=tmp_path / "docs",
+                        openclaw_sync_dir=tmp_path / ".openclaw-sync",
+                        locale="fr",
+                        locale_slug="fr",
+                        mode="incremental",
+                        shard_index=0,
+                        shard_total=1,
+                    )
+                    expected = ["guide/setup.mdx", "index.md"] if needs_refresh else ["guide/setup.mdx"]
+                    self.assertEqual(2, result.all_count)
+                    self.assertEqual(len(expected), result.total_pending_count)
+                    self.assertEqual(expected, [file.relative_to((tmp_path / "docs").resolve()).as_posix() for file in result.shard_files])
 
     def test_pending_manifest_excludes_supported_locale_dirs_without_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1312,6 +1401,13 @@ class I18NScriptTests(unittest.TestCase):
             )
             (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(str(source) + "\n", encoding="utf-8")
 
+            self._prepare_mdx_checker(repo)
+            before = translated.read_bytes()
+            checked, report = self._check_translated_mdx(repo)
+            self.assertEqual(0, checked.returncode, checked.stderr)
+            self.assertEqual([], report["errors"])
+            self.assertEqual(before, translated.read_bytes())
+
             with (
                 chdir(repo),
                 env(
@@ -1329,7 +1425,7 @@ class I18NScriptTests(unittest.TestCase):
                         "TOTAL_PENDING_COUNT": "1",
                         "ALL_COUNT": "1",
                         "TRANSLATE_OUTCOME": "success",
-                        "MDX_CHECK_OUTCOME": "success",
+                        "MDX_CHECK_OUTCOME": "success" if checked.returncode == 0 else "failure",
                         "MDX_REPAIR_OUTCOME": "skipped",
                         "MDX_SCOPE_OUTCOME": "skipped",
                         "MDX_RECHECK_OUTCOME": "skipped",
@@ -1406,6 +1502,187 @@ class I18NScriptTests(unittest.TestCase):
                 '<X default="source" />\n',
                 (artifact / "payload/docs/fr/tools/pdf.md").read_text(encoding="utf-8"),
             )
+
+    def _prepare_mdx_checker(self, repo: Path) -> None:
+        mirror = repo / ".openclaw-sync"
+        mirror.mkdir(exist_ok=True)
+        for name in ("check-docs-mdx.mjs", "check-docs-mdx.mts", "tsx.mjs"):
+            shutil.copy2(REPO_ROOT / ".openclaw-sync" / name, mirror / name)
+        shutil.copytree(REPO_ROOT / ".openclaw-sync/lib", mirror / "lib")
+        (repo / "node_modules").symlink_to(REPO_ROOT / "node_modules", target_is_directory=True)
+
+    def _check_translated_mdx(self, repo: Path, step: str = "Check translated MDX") -> tuple[subprocess.CompletedProcess, dict]:
+        report = repo / ".openclaw-sync/mdx/fr.json"
+        workflow = (REPO_ROOT / ".github/workflows/translate-locale-reusable.yml").read_text(encoding="utf-8")
+        block = workflow.split(f"      - name: {step}\n", 1)[1].split("      - name:", 1)[0]
+        command = block.split("        run: |\n", 1)[1]
+        for key, value in (("locale_slug", "fr"), ("shard_index", "0"), ("shard_total", "1")):
+            command = command.replace("${{ inputs." + key + " }}", value)
+        result = subprocess.run(
+            ["bash", "-eu", "-c", command], cwd=repo, text=True, capture_output=True,
+            env={**os.environ, "I18N_SCRIPT_DIR": str(SCRIPT_DIR), "GITHUB_WORKSPACE": str(repo), "LOCALE": "fr"},
+        )
+        return result, json.loads(report.read_text(encoding="utf-8"))
+
+    def test_translated_mdx_preflight_catches_pending_markdown_and_rechecks_fresh_report(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mdx quoted ' $() ") as tmp:
+            repo = Path(tmp)
+            init_repo(repo)
+            (repo / "docs/fr").mkdir(parents=True)
+            originals = {}
+            for name, attributes in (("plain.md", ""), ("protected.md", ' className="card"')):
+                source = repo / "docs" / name
+                source.write_text(f'<div{attributes}>Texte</div>\n', encoding="utf-8")
+                translated = repo / "docs/fr" / name
+                translated.write_text(f'<div{attributes}>Texte</span>\n', encoding="utf-8")
+                originals[translated] = translated.read_bytes()
+            run_git(repo, "add", ".")
+            run_git(repo, "commit", "-m", "existing malformed translations")
+            self._prepare_mdx_checker(repo)
+            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(
+                "".join(str(repo / "docs" / file.name) + "\n" for file in originals), encoding="utf-8",
+            )
+            old = subprocess.run(
+                ["node", str(repo / ".openclaw-sync/check-docs-mdx.mjs"), "docs/fr",
+                 "--json-out", ".openclaw-sync/old.json"],
+                cwd=repo, text=True, capture_output=True,
+            )
+            self.assertEqual(0, old.returncode, old.stderr)
+            self.assertEqual([], json.loads((repo / ".openclaw-sync/old.json").read_text())["errors"])
+            self.assertEqual("", run_git(repo, "diff", "--name-only", "--", "docs"))
+
+            checked, report = self._check_translated_mdx(repo)
+            self.assertEqual(1, checked.returncode, checked.stderr)
+            self.assertEqual({"docs/fr/plain.md", "docs/fr/protected.md"}, {error["file"] for error in report["errors"]})
+            for error in report["errors"]:
+                self.assertEqual("translated-mdx", error["type"])
+                self.assertIn("Unexpected closing tag", error["message"])
+                self.assertIn("span", error["message"])
+                self.assertIn("div", error["message"])
+            for file, before in originals.items():
+                self.assertEqual(before, file.read_bytes())
+                file.write_bytes(before.replace(b"</span>", b"</div>"))
+            rechecked = subprocess.run(report["recheck_command"], cwd=repo.parent, text=True, capture_output=True)
+            self.assertEqual(0, rechecked.returncode, rechecked.stderr)
+            fresh = json.loads((repo / ".openclaw-sync/mdx/fr.json").read_text())
+            self.assertEqual([], fresh["errors"])
+            self.assertEqual(report["recheck_command"], fresh["recheck_command"])
+            rechecked, fresh = self._check_translated_mdx(repo, "Recheck translated MDX")
+            self.assertEqual(0, rechecked.returncode, rechecked.stderr)
+            self.assertEqual([], fresh["errors"])
+
+    def test_translated_mdx_preflight_preserves_mixed_markdown_and_jsx(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            shutil.copytree(FIXTURES / "pending-docs/docs", repo / "docs")
+            self._prepare_mdx_checker(repo)
+            translated = repo / "docs/fr/index.md"
+            translated.write_text(
+                '---\ntitle: Exemple\n---\n<!-- unmatched { ` <X /> -->\n\n'
+                'Texte n < 9, <user@example.com>, <https://example.com>.\n\n'
+                '`<X id="literal" />`\n\n```mdx\n<div></span>\n```\n\n'
+                '<Card id="stable" title="Français">Texte</Card>\n\n{ready && <X />}\n',
+                encoding="utf-8",
+            )
+            (repo / "docs/fr/valid.mdx").write_text('<Card title="Français" />\n', encoding="utf-8")
+            (repo / "docs/fr/not-pending.md").write_text('<div></span>\n', encoding="utf-8")
+            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(
+                "".join(str(repo / "docs" / name) + "\n" for name in ("index.md", "valid.mdx", "missing.md")),
+                encoding="utf-8",
+            )
+            before = {file: file.read_bytes() for file in (repo / "docs").rglob("*") if file.is_file()}
+            checked, report = self._check_translated_mdx(repo)
+            self.assertEqual(0, checked.returncode, checked.stderr)
+            self.assertEqual([], report["errors"])
+            self.assertEqual(before, {file: file.read_bytes() for file in (repo / "docs").rglob("*") if file.is_file()})
+            translated.write_text("Texte n < 9, <user@example.com>, <div></span>\n", encoding="utf-8")
+            checked, report = self._check_translated_mdx(repo)
+            self.assertEqual(1, checked.returncode, checked.stderr)
+            error, = report["errors"]
+            self.assertEqual(1, error["line"])
+            self.assertNotIn("column", error)
+            self.assertIn("columns refer to normalized Markdown", error["message"])
+
+    def test_translated_mdx_preflight_combines_generic_and_packaging_syntax_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "docs/fr").mkdir(parents=True)
+            self._prepare_mdx_checker(repo)
+            for name, value in {
+                "poison.md": "analysis to=functions.exec\n",
+                "accordion.md": '<Accordion title="Title">\nContent\n  </Accordion>\n',
+                "generic.mdx": "<div></span>\n",
+                "pending.md": "<div></span>\n",
+            }.items():
+                (repo / "docs/fr" / name).write_text(value, encoding="utf-8")
+            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(str(repo / "docs/pending.md") + "\n")
+            checked, report = self._check_translated_mdx(repo)
+            self.assertEqual(1, checked.returncode, checked.stderr)
+            self.assertEqual(
+                {("poison-text", "docs/fr/poison.md"), ("mintlify-mdx", "docs/fr/accordion.md"),
+                 ("mdx", "docs/fr/generic.mdx"), ("translated-mdx", "docs/fr/pending.md")},
+                {(error["type"], error["file"]) for error in report["errors"]},
+            )
+
+    def test_translated_mdx_preflight_bounds_reports_and_reveals_remaining_errors(self) -> None:
+        for poison in (False, True):
+            with self.subTest(poison=poison), tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                (repo / "docs/fr").mkdir(parents=True)
+                self._prepare_mdx_checker(repo)
+                sources = []
+                for index in range(52):
+                    source = repo / "docs" / f"page-{index:02}.md"
+                    source.write_text("<div>Texte</div>\n", encoding="utf-8")
+                    sources.append(str(source))
+                    (repo / "docs/fr" / source.name).write_text(
+                        ("/home/runner/work/example\n\n" if poison else "") + "<div>Texte</span>\n",
+                        encoding="utf-8",
+                    )
+                (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text("\n".join(sources) + "\n")
+                checked, report = self._check_translated_mdx(repo)
+                self.assertEqual(1, checked.returncode, checked.stderr)
+                self.assertEqual(50, len(report["errors"]))
+                self.assertEqual({"poison-text" if poison else "translated-mdx"}, {error["type"] for error in report["errors"]})
+                reported = {error["file"] for error in report["errors"]}
+                remaining = {f"docs/fr/page-{index:02}.md" for index in range(52)} - reported
+                self.assertEqual(2, len(remaining))
+                for file in reported:
+                    (repo / file).write_bytes((repo / "docs" / Path(file).name).read_bytes())
+                checked, report = self._check_translated_mdx(repo, "Recheck translated MDX")
+                self.assertEqual(1, checked.returncode, checked.stderr)
+                self.assertEqual(remaining, {error["file"] for error in report["errors"]})
+                self.assertEqual(4 if poison else 2, len(report["errors"]))
+                self.assertTrue(any(error["type"] == "translated-mdx" for error in report["errors"]))
+                for file in remaining:
+                    (repo / file).write_bytes((repo / "docs" / Path(file).name).read_bytes())
+                checked, report = self._check_translated_mdx(repo, "Recheck translated MDX")
+                self.assertEqual(0, checked.returncode, checked.stderr)
+                self.assertEqual([], report["errors"])
+
+    def test_translated_mdx_preflight_fails_closed_on_generic_checker_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "docs/fr").mkdir(parents=True)
+            self._prepare_mdx_checker(repo)
+            (repo / "docs/fr/index.md").write_text("<div></span>\n", encoding="utf-8")
+            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(str(repo / "docs/index.md") + "\n")
+            output = repo / ".openclaw-sync/mdx/fr.json"
+            output.parent.mkdir()
+            for body, code in ((None, 1), ("not JSON", 0), ('{}', 0),
+                               ('{"files":1,"errors":[{}]}', 1), ('{"files":1,"errors":[]}', 2)):
+                with self.subTest(body=body, code=code):
+                    # Break the actual subprocess/report boundary, without a production injection hook.
+                    program = 'import fs from "node:fs";\n'
+                    if body is not None:
+                        program += f'fs.writeFileSync(process.argv[process.argv.indexOf("--json-out") + 1], {json.dumps(body)});\n'
+                    program += f'process.exit({code});\n'
+                    (repo / ".openclaw-sync/check-docs-mdx.mjs").write_text(program, encoding="utf-8")
+                    output.write_text('{"files":999,"errors":[],"stale":true}', encoding="utf-8")
+                    checked, report = self._check_translated_mdx(repo)
+                    self.assertEqual(1, checked.returncode, checked.stderr)
+                    self.assertNotIn("stale", report)
+                    self.assertEqual({"generic-checker", "translated-mdx"}, {error["type"] for error in report["errors"]})
 
     def test_mdx_protected_attribute_signatures_use_parsed_element_ownership(self) -> None:
         script = REPO_ROOT / ".github/scripts/i18n/check_mdx_protected_attributes.mjs"
@@ -1522,39 +1799,23 @@ class I18NScriptTests(unittest.TestCase):
     def test_mdx_syntax_repair_rescues_common_translation_damage(self) -> None:
         repair = REPO_ROOT / ".github/scripts/i18n/repair_mdx_syntax.mjs"
         cases = [
-            # Fabricated unclosed element: the invented <id> token is removed
-            # and the translated prose stays.
-            (
-                '<ParamField path="prompt" type="string" label="Prompt" />\n\nUse a prompt.\n',
-                "Utilisez un <id> prompt.\n",
-                "Utilisez un  prompt.\n",
-            ),
-            # Stray closing tag is dropped and the unterminated flow element is
-            # closed on its own line.
+            # A mismatched closer is corrected to the parser-identified source element.
             (
                 "<div>\n  <span>Score</span>\n</div>\n",
                 "<div>\n  <span>Skor kartu</span>\n</span>\n",
-                "<div>\n  <span>Skor kartu</span>\n</div>\n\n",
+                "<div>\n  <span>Skor kartu</span>\n</div>\n",
             ),
-            # Unquoted attribute values are quoted; junk where an attribute
-            # name was expected is dropped.
+            # Unquoted attribute values on a known element are quoted.
             (
                 '<Tabs>\n  <Tab title="Questions">Answer</Tab>\n</Tabs>\n',
-                "<Tabs>\n  <Tab title=Domande 'freq> Risposta</Tab>\n</Tabs>\n",
-                '<Tabs>\n  <Tab title="Domande" freq> Risposta</Tab>\n</Tabs>\n',
+                "<Tabs>\n  <Tab title=Domande> Risposta</Tab>\n</Tabs>\n",
+                '<Tabs>\n  <Tab title="Domande"> Risposta</Tab>\n</Tabs>\n',
             ),
-            # A real element that lost its closer gets it back.
-            (
-                "<Note>Take care</Note>\n\nEnd.\n",
-                "<Note>Prendre soin\n\nFin.\n",
-                "<Note>Prendre soin</Note>\n\nFin.\n",
-            ),
-            # Unquoted values stop before the `/>` delimiter so self-closing
-            # syntax is preserved.
+            # Whitespace makes an unquoted value's self-closing boundary unambiguous.
             (
                 '<img src="guide" />\n',
-                "<img src=guide/>\n",
-                '<img src="guide"/>\n',
+                "<img src=guide />\n",
+                '<img src="guide" />\n',
             ),
             # Terminated Markdown/HTML comments are valid downstream and are
             # left untouched (never rewritten to MDX expression syntax).
@@ -1563,51 +1824,18 @@ class I18NScriptTests(unittest.TestCase):
                 "texte <!-- note ici --> plus\n",
                 "texte <!-- note ici --> plus\n",
             ),
-            # Unterminated comments are closed so the text stays commented out.
-            (
-                "text note here more\n",
-                "texte <!-- note ici\n",
-                "texte <!-- note ici -->\n",
-            ),
             # Void elements become self-closing; comments stay intact and must
             # not hide the real damage from diagnosis.
             (
-                "<Note>Take care</Note>\n",
-                "<!-- translated -->\nLigne un<br>\n<Note>Prendre soin\n",
+                "Ligne un<br />\n<Note>Take care</Note>\n",
+                "<!-- translated -->\nLigne un<br>\n<Note>Prendre soin</Note>\n",
                 "<!-- translated -->\nLigne un<br />\n<Note>Prendre soin</Note>\n",
             ),
-            # Real elements get closed; prose less-than stays untouched because
-            # diagnosis shares the downstream chain's tolerant masking.
+            # Prose less-than and comments stay untouched during attribute recovery.
             (
-                "<Note>Take care</Note>\n",
-                "compare 1 < 2\n\n<Note>Prendre soin\n",
-                "compare 1 < 2\n\n<Note>Prendre soin</Note>\n",
-            ),
-            # Adjacent stray closers all get removed (mutable offsets are not
-            # patch identities), then the real element gets closed.
-            (
-                "<div>a</div>\n",
-                "<div>a</span></em>\n",
-                "<div>a</div>\n",
-            ),
-            # A fabricated flow-level element is removed, never closed: an
-            # undefined uppercase component would break MDX rendering.
-            (
-                "<div>a</div>\n",
-                "<Div>\ntexte\n",
-                "\ntexte\n",
-            ),
-            # The opener search must target the diagnosed element, not the
-            # first same-name token inside comments or code examples.
-            (
-                "<div>a</div>\n",
-                "<!-- <Div> example -->\n<Div>\ntexte\n",
-                "<!-- <Div> example -->\n\ntexte\n",
-            ),
-            (
-                "<div>a</div>\n",
-                "```\n<Div> example\n```\n\n<Div>\ntexte\n",
-                "```\n<Div> example\n```\n\n\ntexte\n",
+                '<Note title="Care">Take care</Note>\n',
+                'compare 1 < 2\n\n<Note title=Soin>Prendre soin</Note>\n',
+                'compare 1 < 2\n\n<Note title="Soin">Prendre soin</Note>\n',
             ),
             # Astral Unicode inside a terminated comment must not shift the
             # masked-copy offsets used to locate the stray closer.
@@ -1648,6 +1876,9 @@ class I18NScriptTests(unittest.TestCase):
             'const markdownProcessor = createProcessor({ format: "md" });\n'
             'const result = repairMdxSyntax(processor, markdownProcessor, "<Note>ok</Note>\\n", "<Note>ok</Note>\\n");\n'
             "if (result.changed) throw new Error(`unexpected rewrite: ${JSON.stringify(result.value)}`);\n"
+            'const dynamic = "<Note icon={<span>A</span>}>Care</Note>\\n";\n'
+            'const unchanged = repairMdxSyntax(processor, markdownProcessor, dynamic, dynamic);\n'
+            'if (unchanged.changed || unchanged.value !== dynamic) throw new Error("valid expression JSX changed");\n'
         )
         subprocess.run(
             ["node", "--input-type=module", "-e", program],
@@ -1681,6 +1912,42 @@ class I18NScriptTests(unittest.TestCase):
         )
         self.assertIn("MDX syntax repair exhausted", result.stdout)
 
+    def test_mdx_syntax_repair_preserves_ambiguous_literal_tags(self) -> None:
+        repair = REPO_ROOT / ".github/scripts/i18n/repair_mdx_syntax.mjs"
+        cases = [
+            ("Use `<id>` here.\n", "Utilisez <id> ici.\n"),
+            ("Use `</id>` here.\n", "Utilisez </id> ici.\n"),
+            ("Use `<br>` here.\n", "Utilisez <br> ici.\n"),
+            ("Use &lt;br&gt; here.\n", "Utilisez <br> ici.\n"),
+            ("<Note>Use `<Note>` here.</Note>\n", "<Note>Texte\n"),
+            ("Plain prose.\n", "<Widget! />\n"),
+            ("Plain prose.\n", "<Widget title=Texte />\n"),
+            ('<Note title="Care">Care</Note>\n', "<Note title=Soin 'freq>Texte</Note>\n"),
+            ("Plain prose.\n", "<Div>\nTexte\n"),
+            ("Plain prose.\n", "Un <id> mot.\n\nUn <other> mot.\n"),
+            ("<div>a</div>\n", "<div>a</span></em>\n"),
+            ('<span id="a">A</span><em id="b">B</em>\n', '<span id="a">A<em id="b">B</em>\n'),
+            ('<span id="a">A</span><em id="b">B</em>\n', '<span id="a">A<em id="b">B</span></em>\n'),
+            ('<Note>Care</Note>\n\n{true && <span>A</span>}\n', '<Note>Soin</Wrong>\n\n{true && <em>A</em>}\n'),
+            ('<Note icon={<span>A</span>}>Care</Note>\n', '<Note icon={<em>A</em>}>Soin</Wrong>\n'),
+            ('<Tab title="Frequent questions">Answer</Tab>\n', '<Tab title=Domande frequenti>Risposta</Tab>\n'),
+            ('Before <!-- comment --> visible after\n', 'Avant <!-- commentaire visible apres\n'),
+            ('<img src="guide/" />\n', '<img src=guide/>\n'),
+        ]
+        program = (
+            'import { createProcessor } from "@mdx-js/mdx";\n'
+            f"import {{ repairMdxSyntax }} from {json.dumps(repair.as_uri())};\n"
+            'const processor = createProcessor({ format: "mdx" });\n'
+            'const markdownProcessor = createProcessor({ format: "md" });\n'
+            f"for (const [source, translated] of {json.dumps(cases)}) {{\n"
+            '  let rejected = false;\n'
+            '  try { repairMdxSyntax(processor, markdownProcessor, source, translated); }\n'
+            '  catch { rejected = true; }\n'
+            '  if (!rejected) throw new Error(`ambiguous tag was accepted: ${translated}`);\n'
+            '}\n'
+        )
+        subprocess.run(["node", "--input-type=module", "-e", program], cwd=REPO_ROOT, check=True)
+
         # A multiline unterminated comment has no knowable end; the repair must
         # refuse instead of exposing or hiding the remainder.
         program = (
@@ -1705,69 +1972,67 @@ class I18NScriptTests(unittest.TestCase):
         )
         self.assertIn("MDX syntax repair exhausted", result.stdout)
 
-    def test_package_artifact_repairs_mdx_syntax_before_protected_attributes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+    def test_mdx_syntax_workflow_rescue_keeps_existing_validation_and_packaging(self) -> None:
+        workflow = (REPO_ROOT / ".github/workflows/translate-locale-reusable.yml").read_text()
+        rescue_name = "      - name: Rescue translated MDX syntax\n"
+        check_name = "      - name: Check translated MDX\n"
+        self.assertLess(workflow.index(rescue_name), workflow.index(check_name))
+        block = workflow.split(rescue_name, 1)[1].split("      - name:", 1)[0]
+        self.assertIn("continue-on-error: true", block)
+        command = block.split("        run: |\n", 1)[1]
+        for key, value in (("locale_slug", "fr"), ("shard_index", "0"), ("shard_total", "1")):
+            command = command.replace("${{ inputs." + key + " }}", value)
+        with tempfile.TemporaryDirectory(prefix="mdx rescue ' $() ") as tmp:
             repo = Path(tmp)
             init_repo(repo)
-            (repo / ".openclaw-sync").mkdir()
-            (repo / "docs/fr/tools").mkdir(parents=True)
-            (repo / "docs/tools").mkdir(parents=True)
-            source = repo / "docs/tools/pdf.md"
-            translated = repo / "docs/fr/tools/pdf.md"
-            source.write_text(
-                '<Note path="prompt" type="string" label="Prompt">care</Note>\n',
-                encoding="utf-8",
-            )
+            (repo / "docs/fr").mkdir(parents=True)
+            source = repo / "docs/guide.md"
+            translated = repo / "docs/fr/guide.md"
+            source.write_text('<Note path="prompt">Take care</Note>\n')
+            translated.write_text('<Note path="invite">Prendre soin</Wrong>\n')
+            before = translated.read_bytes()
             run_git(repo, "add", ".")
             run_git(repo, "commit", "-m", "initial")
-
-            translated.write_text(
-                '<Note path="invite" type="texte" label="Invite">soin',
-                encoding="utf-8",
-            )
-            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(str(source) + "\n", encoding="utf-8")
-
-            with (
-                chdir(repo),
-                env(
-                    {
-                        "GITHUB_WORKSPACE": str(repo),
-                        "LOCALE": "fr",
-                        "LOCALE_SLUG": "fr",
-                        "SOURCE_SHA": "source-a",
-                        "MODE": "full",
-                        "SHARD_INDEX": "0",
-                        "SHARD_TOTAL": "1",
-                        "WORKER_PARALLEL": "3",
-                        "THINKING_EFFORT": "xhigh",
-                        "PENDING_COUNT": "1",
-                        "TOTAL_PENDING_COUNT": "1",
-                        "ALL_COUNT": "1",
-                        "TRANSLATE_OUTCOME": "success",
-                        "MDX_CHECK_OUTCOME": "success",
-                        "MDX_REPAIR_OUTCOME": "skipped",
-                        "MDX_SCOPE_OUTCOME": "skipped",
-                        "MDX_RECHECK_OUTCOME": "skipped",
-                    }
-                ),
-            ):
+            self._prepare_mdx_checker(repo)
+            manifest = repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt"
+            manifest.write_text(str(source) + "\n")
+            checked, _ = self._check_translated_mdx(repo)
+            self.assertEqual(1, checked.returncode, checked.stderr)
+            invocation = dict(cwd=repo, text=True, capture_output=True, env={
+                **os.environ, "I18N_SCRIPT_DIR": str(SCRIPT_DIR), "GITHUB_WORKSPACE": str(repo), "LOCALE": "fr",
+            })
+            result = subprocess.run(["bash", "-eu", "-c", command], **invocation)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual({"repaired": ["docs/fr/guide.md"]}, json.loads(result.stdout))
+            checked, report = self._check_translated_mdx(repo)
+            self.assertEqual(0, checked.returncode, checked.stderr)
+            self.assertEqual([], report["errors"])
+            with chdir(repo), env({
+                "GITHUB_WORKSPACE": str(repo), "LOCALE": "fr", "LOCALE_SLUG": "fr", "SOURCE_SHA": "source-a",
+                "MODE": "full", "SHARD_INDEX": "0", "SHARD_TOTAL": "1", "WORKER_PARALLEL": "1",
+                "THINKING_EFFORT": "high", "PENDING_COUNT": "1", "TOTAL_PENDING_COUNT": "1", "ALL_COUNT": "1",
+                "TRANSLATE_OUTCOME": "success", "MDX_CHECK_OUTCOME": "success", "MDX_REPAIR_OUTCOME": "skipped",
+                "MDX_SCOPE_OUTCOME": "skipped", "MDX_RECHECK_OUTCOME": "skipped",
+            }):
                 metadata = package_artifact.package_artifact(repo, Path(".openclaw-sync"))
-
-            expected = '<Note path="prompt" type="string" label="Invite">soin</Note>'
             self.assertEqual("", metadata["failed_reason"])
-            self.assertEqual("success", metadata["mdx_syntax_repair_outcome"])
-            self.assertEqual("success", metadata["mdx_protected_attribute_repair_outcome"])
-            self.assertEqual(expected, translated.read_text(encoding="utf-8"))
+            payload = repo / ".openclaw-sync/artifacts/fr-s0of1/payload/docs/fr/guide.md"
+            self.assertEqual('<Note path="prompt">Prendre soin</Note>\n', payload.read_text())
+            self.assertEqual('<Note path="prompt">Take care</Note>\n', source.read_text())
 
-    def test_syntax_repair_skips_empty_manifest_without_node(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            (repo / ".openclaw-sync").mkdir()
-            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text("", encoding="utf-8")
-            with patch.object(package_artifact.subprocess, "run") as run:
-                result = package_artifact.repair_mdx_syntax(repo, "fr", "fr", 0, 1)
-            self.assertEqual(("", [], False), result)
-            run.assert_not_called()
+            # An unsupported later page must leave the first page's tentative repair unwritten.
+            translated.write_bytes(before)
+            (repo / "docs/broken.md").write_text("# Source\n")
+            broken = repo / "docs/fr/broken.md"
+            broken.write_text("<!-- hidden\nvisible text\n")
+            manifest.write_text(str(source) + "\n" + str(repo / "docs/broken.md") + "\n")
+            result = subprocess.run(["bash", "-eu", "-c", command], **invocation)
+            self.assertEqual(1, result.returncode)
+            self.assertEqual(before, translated.read_bytes())
+            self.assertEqual("<!-- hidden\nvisible text\n", broken.read_text())
+            checked, report = self._check_translated_mdx(repo)
+            self.assertEqual(1, checked.returncode)
+            self.assertTrue(report["errors"])
 
     def test_repair_scripts_reject_locale_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2125,6 +2390,65 @@ class I18NScriptTests(unittest.TestCase):
             self.assertTrue(committed)
             self.assertEqual("# Hindi\n", run_git(repo, "show", "origin/main:docs/hi/index.md"))
             self.assertNotIn("docs/.i18n/hi.tm.jsonl", run_git(repo, "ls-tree", "-r", "--name-only", "origin/main"))
+
+    def test_ensure_base_current_treats_empty_remote_sha_as_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github_output"
+            stdout = io.StringIO()
+            with patch.object(commit_locale_artifact, "remote_source_sha", return_value=""), patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}), redirect_stdout(stdout):
+                current = commit_locale_artifact.ensure_base_current("source-a", "fr")
+            self.assertFalse(current)
+            self.assertIn("committed=false", output.read_text(encoding="utf-8"))
+            self.assertIn("missing or unreadable", stdout.getvalue())
+
+    def test_commit_locale_skips_push_when_origin_source_json_is_unreadable(self) -> None:
+        cases = {
+            "missing": None,
+            "invalid": "{not-json\n",
+            "empty_sha": json.dumps({"repository": "openclaw/openclaw", "sha": ""}) + "\n",
+            "missing_sha": json.dumps({"repository": "openclaw/openclaw"}) + "\n",
+        }
+        for name, source_body in cases.items():
+            with self.subTest(name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    tmp_path = Path(tmp)
+                    origin = tmp_path / "origin.git"
+                    subprocess.run(["git", "init", "--bare", str(origin)], check=True, text=True, stdout=subprocess.PIPE)
+                    repo = tmp_path / "repo"
+                    repo.mkdir()
+                    init_repo(repo)
+                    (repo / ".openclaw-sync").mkdir()
+                    if source_body is None:
+                        (repo / ".openclaw-sync/keep").write_text("x\n", encoding="utf-8")
+                    else:
+                        (repo / ".openclaw-sync/source.json").write_text(source_body, encoding="utf-8")
+                    (repo / "docs").mkdir()
+                    (repo / "docs/index.md").write_text("# Index\n", encoding="utf-8")
+                    run_git(repo, "add", ".")
+                    run_git(repo, "commit", "-m", "initial")
+                    run_git(repo, "remote", "add", "origin", str(origin))
+                    run_git(repo, "push", "-u", "origin", "main")
+
+                    (repo / "docs/hi").mkdir(parents=True)
+                    (repo / "docs/hi/index.md").write_text("# Hindi\n", encoding="utf-8")
+                    artifact = repo / ".openclaw-sync/i18n-artifacts/hi-s0of1"
+                    artifact.mkdir(parents=True)
+                    (artifact / "changed-files.txt").write_text("docs/hi/index.md\n", encoding="utf-8")
+                    (artifact / "deleted-files.txt").write_text("", encoding="utf-8")
+
+                    stdout = io.StringIO()
+                    with chdir(repo), redirect_stdout(stdout):
+                        committed = commit_locale_artifact.commit_locale(
+                            "hi",
+                            "source-a",
+                            1,
+                            artifact_role="canary",
+                            artifact_dir=str(artifact),
+                        )
+
+                    self.assertFalse(committed)
+                    self.assertIn("missing or unreadable", stdout.getvalue())
+                    self.assertNotIn("docs/hi/index.md", run_git(repo, "ls-tree", "-r", "--name-only", "origin/main"))
 
     def test_canary_commit_scope_rejects_unrelated_locale_deletes_not_in_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2602,8 +2926,19 @@ class I18NScriptTests(unittest.TestCase):
             (repo / ".openclaw-sync").mkdir()
             (repo / "docs").mkdir()
             (repo / "docs/index.md").write_text("# Index\n", encoding="utf-8")
+            (repo / "docs/fr").mkdir()
+            stale = repo / "docs/fr/retired.md"
+            stale.write_text("# Retired\n", encoding="utf-8")
             run_git(repo, "add", ".")
             run_git(repo, "commit", "-m", "initial")
+            stale.unlink()
+            (repo / "docs/fr/index.md").write_text("<div></span>\n", encoding="utf-8")
+            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(str(repo / "docs/index.md") + "\n")
+            self._prepare_mdx_checker(repo)
+            checked, _ = self._check_translated_mdx(repo)
+            rechecked, _ = self._check_translated_mdx(repo, "Recheck translated MDX")
+            self.assertEqual(1, checked.returncode, checked.stderr)
+            self.assertEqual(1, rechecked.returncode, rechecked.stderr)
             output = repo / "github-output.txt"
 
             with chdir(repo), env(
@@ -2629,9 +2964,22 @@ class I18NScriptTests(unittest.TestCase):
                 }
             ):
                 package_artifact.package_artifact(repo, Path(".openclaw-sync"))
+                with env({
+                    "TRANSLATE_OUTCOME": "success", "MDX_CHECK_OUTCOME": "failure",
+                    "MDX_REPAIR_OUTCOME": "success", "MDX_SCOPE_OUTCOME": "success",
+                    "MDX_RECHECK_OUTCOME": "failure" if rechecked.returncode else "success",
+                }):
+                    metadata = package_artifact.package_artifact(repo, Path(".openclaw-sync"))
 
             self.assertIn("failed=true", output.read_text(encoding="utf-8"))
             self.assertIn("failed_reason=translation failed", output.read_text(encoding="utf-8"))
+            self.assertIn("failed_reason=mdx repair failed", output.read_text(encoding="utf-8"))
+            self.assertEqual("mdx repair failed", metadata["failed_reason"])
+            self.assertEqual((0, 0), (metadata["changed_count"], metadata["deleted_count"]))
+            artifact = repo / ".openclaw-sync/artifacts/fr-s0of1"
+            for name in ("changed-files.txt", "deleted-files.txt"):
+                self.assertEqual("", (artifact / name).read_text(encoding="utf-8"))
+            self.assertFalse(any((artifact / "payload").rglob("*.md")))
 
     def test_mdx_repair_scope_allows_preexisting_untracked_locale_files_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2655,6 +3003,11 @@ class I18NScriptTests(unittest.TestCase):
                 mdx_repair_scope.enforce_scope(repo, "fr", baseline)
             (repo / "docs/index.md").write_text("# Index\n", encoding="utf-8")
 
+            (repo / "docs/index.md").write_text("# Staged source side effect\n", encoding="utf-8")
+            run_git(repo, "add", "docs/index.md")
+            with self.assertRaises(SystemExit):
+                mdx_repair_scope.enforce_scope(repo, "fr", baseline)
+            run_git(repo, "restore", "--staged", "docs/index.md")
             (repo / "docs/index.md").write_text("# Index\n", encoding="utf-8")
 
             (repo / "docs/fr/from-repair.md").write_text("# Repair side effect\n", encoding="utf-8")
@@ -2667,597 +3020,6 @@ class I18NScriptTests(unittest.TestCase):
             run_git(repo, "add", "docs/fr/staged-from-repair.md")
             with self.assertRaises(SystemExit):
                 mdx_repair_scope.enforce_scope(repo, "fr", baseline)
-
-            # Staged non-locale side effects are forbidden too. This stays
-            # last so the suite never has to unstage the shared index.
-            (repo / "docs/index.md").write_text("# Staged source side effect\n", encoding="utf-8")
-            run_git(repo, "add", "docs/index.md")
-            with self.assertRaises(SystemExit):
-                mdx_repair_scope.enforce_scope(repo, "fr", baseline)
-
-    def _relay_reusable_workflow_text(self) -> str:
-        return (REPO_ROOT / ".github/workflows/translate-locale-reusable.yml").read_text(encoding="utf-8")
-
-    def test_reusable_workflow_keeps_single_entry_bounded_relay(self) -> None:
-        text = self._relay_reusable_workflow_text()
-
-        # D-09 budgets are explicit workflow env with the approved defaults.
-        self.assertIn('MDX_REPAIR_MAX_ATTEMPTS: "4"', text)
-        self.assertIn('MDX_REPAIR_HARD_TIMEOUT_MS: "600000"', text)
-        self.assertIn('MDX_REPAIR_AUXILIARY_MODE: "none"', text)
-
-        # Exactly one Agent entry, unrolled into at most MAX_ATTEMPTS rounds;
-        # no other Codex executor and no auxiliary arm exists in production.
-        self.assertEqual(4, text.count("uses: openai/codex-action@v1"))
-        self.assertEqual(4, text.count("timeout-minutes: 12\n"))
-        self.assertEqual(4, text.count("prompt-file: .openclaw-sync/docs-mdx-repair.md"))
-        # No legacy --full-auto CLI flag: sandbox/approval semantics are
-        # carried by the codex-action inputs themselves (sandbox,
-        # safety-strategy), matching the production minimal call surface.
-        self.assertNotIn("full-auto", text)
-        self.assertEqual(4, text.count("sandbox: workspace-write"))
-        self.assertEqual(4, text.count("safety-strategy: drop-sudo"))
-        self.assertNotIn("codex exec", text)
-        self.assertNotIn("prettier", text)
-        self.assertNotIn("pr153", text)
-
-        # Contract stage order: strict check -> relay decision -> scope
-        # snapshot -> per-round (repair -> enforce scope -> recheck) -> report
-        # -> artifact packaging.
-        order = [
-            "Check translated MDX",
-            "Decide MDX repair relay",
-            "Snapshot translated MDX repair scope",
-            "Repair translated MDX\n",
-            "Enforce translated MDX repair scope\n",
-            "Recheck translated MDX\n",
-            "Repair translated MDX (relay round 2)",
-            "Enforce translated MDX repair scope (relay round 2)",
-            "Recheck translated MDX (relay round 2)",
-            "Repair translated MDX (relay round 3)",
-            "Enforce translated MDX repair scope (relay round 3)",
-            "Recheck translated MDX (relay round 3)",
-            "Repair translated MDX (relay round 4)",
-            "Enforce translated MDX repair scope (relay round 4)",
-            "Recheck translated MDX (relay round 4)",
-            "Record MDX repair relay outcome",
-            "Prepare locale artifact",
-        ]
-        positions = [text.index(name) for name in order]
-        self.assertEqual(sorted(positions), positions)
-
-        # Relay stop conditions: round N+1 only runs when round N's recheck
-        # still failed, so retries are bounded and diagnostics stay current.
-        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 1", text)
-        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 2", text)
-        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 3", text)
-        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 4", text)
-        self.assertIn("steps.mdx_repair.outcome == 'success' &&\n          steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure'", text)
-        self.assertIn("steps.mdx_repair_2.outcome == 'success' &&\n          steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure'", text)
-        self.assertIn("steps.mdx_repair_3.outcome == 'success' &&\n          steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure'", text)
-
-        # Every relay round keeps the scope and strict recheck gates; the
-        # scope baseline is snapshotted once before the first repair round.
-        self.assertEqual(4, text.count('mdx_repair_scope.py" enforce'))
-        self.assertEqual(1, text.count('mdx_repair_scope.py" snapshot'))
-        self.assertEqual(5, text.count("check-docs-mdx.mjs"))
-        self.assertIn('python "${I18N_SCRIPT_DIR}/mdx_repair_relay.py" decide', text)
-        self.assertIn('python "${I18N_SCRIPT_DIR}/mdx_repair_relay.py" report', text)
-
-    def test_docs_mdx_repair_prompt_carries_relay_protocol(self) -> None:
-        prompt_file = REPO_ROOT / ".openclaw-sync/docs-mdx-repair.md"
-        prompt = " ".join(prompt_file.read_text(encoding="utf-8").split())
-
-        self.assertIn("multi-round relay protocol", prompt)
-        self.assertIn("fix all parser/checker diagnostics reported for this round", prompt)
-        self.assertIn("continue fixing the remaining diagnostics", prompt)
-        self.assertIn("until the pages pass strict MDX", prompt)
-        self.assertIn("must_preserve", prompt)
-        self.assertIn("Do not rewrite the whole page", prompt)
-        self.assertIn("Do not add, delete, or rename files", prompt)
-        self.assertIn(".openclaw-sync/mdx/${LOCALE}.json", prompt)
-        self.assertIn("MDX_REPAIR_MAX_ATTEMPTS", prompt)
-        self.assertIn("complete pages", prompt)
-
-    def _relay_decide_workspace(self, repo: Path, errors: list[dict], manifest_lines: list[str]) -> None:
-        mdx_dir = repo / ".openclaw-sync/mdx"
-        mdx_dir.mkdir(parents=True, exist_ok=True)
-        (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text("\n".join(manifest_lines) + ("\n" if manifest_lines else ""), encoding="utf-8")
-        (mdx_dir / "fr.json").write_text(json.dumps({"files": 1, "errors": errors}), encoding="utf-8")
-
-    def test_repair_relay_decide_runs_on_strict_compile_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            source = repo / "docs/index.md"
-            source.parent.mkdir(parents=True)
-            source.write_text("# Index\n", encoding="utf-8")
-            (repo / "docs/fr").mkdir()
-            (repo / "docs/fr/index.md").write_text("# Index FR\n", encoding="utf-8")
-            self._relay_decide_workspace(
-                repo,
-                [{"type": "mdx", "file": "docs/fr/index.md", "line": 1, "column": 1, "message": "Unexpected end of file"}],
-                [str(source)],
-            )
-            output = repo / "github-output.txt"
-            relay_env = {
-                "GITHUB_WORKSPACE": str(repo),
-                "GITHUB_OUTPUT": str(output),
-                "RUNNER_TEMP": str(repo / ".openclaw-sync/mdx"),
-                "LOCALE": "fr",
-                "LOCALE_SLUG": "fr",
-                "SHARD_INDEX": "0",
-                "SHARD_TOTAL": "1",
-                "MDX_CHECK_OUTCOME": "failure",
-                "MDX_REPAIR_MAX_ATTEMPTS": "4",
-                "MDX_REPAIR_HARD_TIMEOUT_MS": "600000",
-            }
-
-            with chdir(repo), env(relay_env):
-                mdx_repair_relay.decide(repo)
-
-            self.assertIn("decision=run", output.read_text(encoding="utf-8"))
-            state = json.loads((repo / ".openclaw-sync/mdx/fr-repair-state.json").read_text(encoding="utf-8"))
-            self.assertEqual("run", state["decision"])
-            self.assertEqual("relay", state["repair_mode"])
-            self.assertEqual(4, state["max_attempts"])
-            self.assertEqual(600000, state["hard_timeout_ms"])
-            self.assertEqual("none", state["auxiliary_mode"])
-            snapshot = json.loads(
-                (repo / ".openclaw-sync/mdx/fr.repair-content-snapshot.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(["docs/fr/index.md"], sorted(snapshot))
-
-    def test_repair_relay_decide_records_not_run_for_startup_conditions(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            source = repo / "docs/index.md"
-            source.parent.mkdir(parents=True)
-            source.write_text("# Index\n", encoding="utf-8")
-            output = repo / "github-output.txt"
-            base_env = {
-                "GITHUB_WORKSPACE": str(repo),
-                "GITHUB_OUTPUT": str(output),
-                "RUNNER_TEMP": str(repo / ".openclaw-sync/mdx"),
-                "LOCALE": "fr",
-                "LOCALE_SLUG": "fr",
-                "SHARD_INDEX": "0",
-                "SHARD_TOTAL": "1",
-                "MDX_CHECK_OUTCOME": "failure",
-                "MDX_REPAIR_MAX_ATTEMPTS": "4",
-                "MDX_REPAIR_HARD_TIMEOUT_MS": "600000",
-            }
-            compile_error = {"type": "mdx", "file": "docs/fr/index.md", "line": 1, "column": 1, "message": "boom"}
-
-            def decide_with(errors: list[dict], manifest_lines: list[str], check_outcome: str = "failure") -> str:
-                output.write_text("", encoding="utf-8")
-                self._relay_decide_workspace(repo, errors, manifest_lines)
-                with chdir(repo), env({**base_env, "MDX_CHECK_OUTCOME": check_outcome}):
-                    mdx_repair_relay.decide(repo)
-                return output.read_text(encoding="utf-8")
-
-            # Strict check passed: the repair must not start.
-            self.assertIn("decision=not_run", decide_with([compile_error], [str(source)], check_outcome="success"))
-            self.assertIn("reason=mdx_check_success", output.read_text(encoding="utf-8"))
-
-            # No pending files: not_run success branch.
-            self.assertIn("decision=not_run", decide_with([compile_error], []))
-            self.assertIn("reason=no_pending_files", output.read_text(encoding="utf-8"))
-
-            # Only non-compile diagnostics (e.g. poison text): not repaired.
-            poison = {"type": "poison-text", "file": "docs/fr/index.md", "line": 1, "column": 1, "message": "leak"}
-            self.assertIn("decision=not_run", decide_with([poison], [str(source)]))
-            self.assertIn("reason=no_mdx_compile_diagnostics", output.read_text(encoding="utf-8"))
-
-            # Diagnostics outside the locale scope: not repaired.
-            outside = {"type": "mdx", "file": "docs/en/index.md", "line": 1, "column": 1, "message": "boom"}
-            self.assertIn("decision=not_run", decide_with([outside], [str(source)]))
-            self.assertIn("reason=diagnostics_out_of_locale_scope", output.read_text(encoding="utf-8"))
-
-            state = json.loads((repo / ".openclaw-sync/mdx/fr-repair-state.json").read_text(encoding="utf-8"))
-            self.assertEqual("none", state["repair_mode"])
-            self.assertFalse((repo / ".openclaw-sync/mdx/fr.repair-content-snapshot.json").exists())
-
-    def test_repair_relay_decide_fails_closed_on_invalid_budget_or_auxiliary(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            source = repo / "docs/index.md"
-            source.parent.mkdir(parents=True)
-            source.write_text("# Index\n", encoding="utf-8")
-            self._relay_decide_workspace(
-                repo,
-                [{"type": "mdx", "file": "docs/fr/index.md", "line": 1, "column": 1, "message": "boom"}],
-                [str(source)],
-            )
-            base_env = {
-                "GITHUB_WORKSPACE": str(repo),
-                "LOCALE": "fr",
-                "LOCALE_SLUG": "fr",
-                "SHARD_INDEX": "0",
-                "SHARD_TOTAL": "1",
-                "MDX_CHECK_OUTCOME": "failure",
-                "MDX_REPAIR_MAX_ATTEMPTS": "4",
-                "MDX_REPAIR_HARD_TIMEOUT_MS": "600000",
-            }
-            with chdir(repo):
-                with env({**base_env, "MDX_REPAIR_MAX_ATTEMPTS": "0"}), self.assertRaisesRegex(SystemExit, "MDX_REPAIR_MAX_ATTEMPTS"):
-                    mdx_repair_relay.decide(repo)
-                with env({**base_env, "MDX_REPAIR_HARD_TIMEOUT_MS": "unlimited"}), self.assertRaisesRegex(SystemExit, "MDX_REPAIR_HARD_TIMEOUT_MS"):
-                    mdx_repair_relay.decide(repo)
-                with env({**base_env, "MDX_REPAIR_AUXILIARY_MODE": "prettier"}), self.assertRaisesRegex(SystemExit, "not enabled in production"):
-                    mdx_repair_relay.decide(repo)
-
-    def _relay_report_workspace(self, repo: Path, errors: list[dict], snapshot: dict[str, str], decision: str = "run") -> None:
-        mdx_dir = repo / ".openclaw-sync/mdx"
-        mdx_dir.mkdir(parents=True, exist_ok=True)
-        (mdx_dir / "fr.json").write_text(json.dumps({"files": 3, "errors": errors}), encoding="utf-8")
-        (mdx_dir / "fr-repair-state.json").write_text(
-            json.dumps(
-                {
-                    "decision": decision,
-                    "not_run_reason": "" if decision == "run" else "no_pending_files",
-                    "locale": "fr",
-                    "locale_slug": "fr",
-                    "shard_index": "0",
-                    "shard_total": "1",
-                    "repair_mode": "relay" if decision == "run" else "none",
-                    "max_attempts": 4,
-                    "hard_timeout_ms": 600000,
-                    "auxiliary_mode": "none",
-                }
-            ),
-            encoding="utf-8",
-        )
-        (mdx_dir / "fr.repair-content-snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
-
-    def test_repair_relay_report_classifies_relay_outcomes(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            docs = repo / "docs"
-            (docs / "fr").mkdir(parents=True)
-            (docs / "index.md").write_text("# Index\n", encoding="utf-8")
-            (docs / "guide.md").write_text("# Guide\n", encoding="utf-8")
-            (docs / "fr/index.md").write_text("# Index FR casse\n", encoding="utf-8")
-            (docs / "fr/guide.md").write_text("# Guide FR\n", encoding="utf-8")
-            (docs / "fr/poison.md").write_text("# Poison FR\n", encoding="utf-8")
-            manifest_lines = [str(docs / name) for name in ("index.md", "guide.md", "poison.md")]
-            (repo / ".openclaw-sync").mkdir(exist_ok=True)
-            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
-            guide_hash = hashlib.sha256((docs / "fr/guide.md").read_bytes()).hexdigest()
-            poison_hash = hashlib.sha256((docs / "fr/poison.md").read_bytes()).hexdigest()
-            output = repo / "github-output.txt"
-            base_env = {
-                "GITHUB_WORKSPACE": str(repo),
-                "GITHUB_OUTPUT": str(output),
-                "RUNNER_TEMP": str(repo / ".openclaw-sync/mdx"),
-                "LOCALE": "fr",
-                "LOCALE_SLUG": "fr",
-                "SHARD_INDEX": "0",
-                "SHARD_TOTAL": "1",
-                "MDX_CHECK_OUTCOME": "failure",
-                "MDX_REPAIR_MAX_ATTEMPTS": "4",
-                "MDX_REPAIR_HARD_TIMEOUT_MS": "600000",
-            }
-            compile_error = {"type": "mdx", "file": "docs/fr/index.md", "line": 3, "column": 1, "message": "Unexpected end of file"}
-            poison_error = {"type": "poison-text", "file": "docs/fr/poison.md", "line": 1, "column": 1, "message": "Leaked tool-call channel marker."}
-
-            def report_with(errors: list[dict], snapshot: dict[str, str], outcomes: str, decision: str = "run") -> dict[str, object]:
-                output.write_text("", encoding="utf-8")
-                self._relay_report_workspace(repo, errors, snapshot, decision)
-                with chdir(repo), env({**base_env, "MDX_REPAIR_ROUNDS_OUTCOMES": outcomes}):
-                    mdx_repair_relay.report(repo)
-                lines = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines() if "=" in line)
-                self.assertEqual("not_run" if decision != "run" else lines["final_outcome"], lines["final_outcome"])
-                return {**lines, "report": json.loads((repo / ".openclaw-sync/mdx/fr-repair-report.json").read_text(encoding="utf-8"))}
-
-            snapshot = {
-                "docs/fr/index.md": "stale-content-hash",
-                "docs/fr/guide.md": guide_hash,
-                "docs/fr/poison.md": poison_hash,
-            }
-            # Partial success: one page still failing, one pending page passing.
-            result = report_with(
-                [compile_error, poison_error],
-                snapshot,
-                "success success failure skipped skipped skipped skipped skipped skipped skipped skipped skipped",
-            )
-            self.assertEqual("partial_success", result["final_outcome"])
-            self.assertEqual("compile_failed", result["failure_kind"])
-            self.assertEqual("relay", result["repair_mode"])
-            self.assertEqual("1", result["rounds"])
-            self.assertEqual("failure", result["recheck_outcome"])
-            self.assertEqual("docs/fr/index.md docs/fr/poison.md", result["failed_paths"])
-            self.assertEqual("docs/fr/poison.md", result["nonsyntax_failed_paths"])
-            self.assertEqual(["docs/fr/index.md"], [record["path"] for record in result["report"]["changed_paths"]])
-            self.assertEqual("mdx", result["report"]["error_source"])
-            self.assertEqual(3, result["report"]["error_line"])
-            self.assertEqual(1, result["report"]["error_column"])
-            self.assertEqual([], result["report"]["violations"])
-
-            # Relay success: strict recheck passed, no failures recorded.
-            result = report_with([], {"docs/fr/guide.md": guide_hash}, "success success success skipped skipped skipped skipped skipped skipped skipped skipped skipped")
-            self.assertEqual("success", result["final_outcome"])
-            self.assertEqual("success", result["recheck_outcome"])
-            self.assertEqual("", result["failed_paths"])
-
-            # Relay never started (not_run decision).
-            result = report_with([compile_error], snapshot, "skipped skipped skipped skipped skipped skipped skipped skipped skipped skipped skipped skipped", decision="not_run")
-            self.assertEqual("not_run", result["final_outcome"])
-            self.assertEqual("none", result["repair_mode"])
-
-            # All pending pages still failing: explicit final failure.
-            damage = {"type": "mdx", "file": "docs/fr/guide.md", "line": 1, "column": 1, "message": "boom"}
-            result = report_with([compile_error, damage, poison_error], snapshot, "success success failure skipped skipped skipped skipped skipped skipped skipped skipped skipped")
-            self.assertEqual("final_failure", result["final_outcome"])
-            self.assertEqual("compile_failed", result["failure_kind"])
-
-            # Hard action failure (timeout/crash) never counts as success.
-            result = report_with([compile_error], snapshot, "failure skipped skipped skipped skipped skipped skipped skipped skipped skipped skipped skipped")
-            self.assertEqual("final_failure", result["final_outcome"])
-            self.assertEqual("action_failed", result["failure_kind"])
-
-            # Repair-phase page deletion/emptying is a content-loss violation.
-            loss_snapshot = {
-                **snapshot,
-                "docs/fr/deleted.md": "gone",
-                "docs/fr/emptied.md": "gone-too",
-            }
-            (docs / "fr/emptied.md").write_text("", encoding="utf-8")
-            result = report_with([], loss_snapshot, "success success success skipped skipped skipped skipped skipped skipped skipped skipped skipped")
-            self.assertEqual("final_failure", result["final_outcome"])
-            self.assertEqual("content_loss", result["failure_kind"])
-            codes = [violation["code"] for violation in result["report"]["violations"]]
-            self.assertEqual(["whole_document_deleted", "empty_output"], codes)
-
-    def test_package_artifact_partial_success_keeps_passing_pages_and_marks_failed(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            init_repo(repo)
-            (repo / ".openclaw-sync").mkdir()
-            (repo / "docs/fr").mkdir(parents=True)
-            (repo / "docs/index.md").write_text("# Index\n", encoding="utf-8")
-            (repo / "docs/guide.md").write_text("# Guide\n", encoding="utf-8")
-            run_git(repo, "add", ".")
-            run_git(repo, "commit", "-m", "initial")
-
-            # Both pages are new translations; one is damaged beyond the
-            # deterministic rescue, one is healthy.
-            (repo / "docs/fr/index.md").write_text("Texte {{ready &&\n", encoding="utf-8")
-            (repo / "docs/fr/guide.md").write_text("# Guide FR\n", encoding="utf-8")
-            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(f"{repo / 'docs/index.md'}\n{repo / 'docs/guide.md'}\n", encoding="utf-8")
-            mdx_dir = repo / ".openclaw-sync/mdx"
-            mdx_dir.mkdir(parents=True)
-            (mdx_dir / "fr-repair-report.json").write_text('{"repair_mode": "relay", "rounds": 2}\n', encoding="utf-8")
-
-            with chdir(repo), env(
-                {
-                    "GITHUB_WORKSPACE": str(repo),
-                    "LOCALE": "fr",
-                    "LOCALE_SLUG": "fr",
-                    "SOURCE_SHA": "source-a",
-                    "MODE": "full",
-                    "SHARD_INDEX": "0",
-                    "SHARD_TOTAL": "1",
-                    "WORKER_PARALLEL": "3",
-                    "THINKING_EFFORT": "xhigh",
-                    "PENDING_COUNT": "2",
-                    "TOTAL_PENDING_COUNT": "2",
-                    "ALL_COUNT": "2",
-                    "TRANSLATE_OUTCOME": "success",
-                    "MDX_CHECK_OUTCOME": "failure",
-                    "MDX_REPAIR_OUTCOME": "success",
-                    "MDX_SCOPE_OUTCOME": "success",
-                    "MDX_RECHECK_OUTCOME": "failure",
-                    "MDX_REPAIR_FINAL_OUTCOME": "partial_success",
-                    "MDX_REPAIR_FAILURE_KIND": "compile_failed",
-                    "MDX_REPAIR_MODE": "relay",
-                    "MDX_REPAIR_ROUNDS": "2",
-                    "MDX_REPAIR_FAILED_PATHS": "docs/fr/index.md",
-                    "MDX_REPAIR_CHANGED_PATHS": "docs/fr/index.md docs/fr/guide.md",
-                }
-            ):
-                metadata = package_artifact.package_artifact(repo, Path(".openclaw-sync"))
-
-            artifact = repo / ".openclaw-sync/artifacts/fr-s0of1"
-            # The damaged page is excluded and explicitly marked; the healthy
-            # page is packaged normally instead of dropping the whole shard.
-            self.assertEqual("", metadata["failed_reason"])
-            self.assertEqual(["docs/fr/guide.md"], (artifact / "changed-files.txt").read_text(encoding="utf-8").splitlines())
-            self.assertTrue((artifact / "payload/docs/fr/guide.md").exists())
-            self.assertFalse((artifact / "payload/docs/fr/index.md").exists())
-            self.assertEqual("partial", metadata["mdx_syntax_repair_outcome"])
-            self.assertEqual("partial_success", metadata["mdx_repair_final_outcome"])
-            self.assertEqual("relay", metadata["mdx_repair_mode"])
-            self.assertEqual(2, metadata["mdx_repair_rounds"])
-            self.assertEqual(["docs/fr/index.md"], metadata["mdx_repair_failed_paths"])
-            self.assertEqual(["docs/fr/guide.md", "docs/fr/index.md"], metadata["mdx_repair_changed_paths"])
-            report = json.loads((artifact / "mdx-repair-report.json").read_text(encoding="utf-8"))
-            self.assertEqual("relay", report["repair_mode"])
-
-    def test_package_artifact_salvages_fixable_pages_in_partial_shard(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            init_repo(repo)
-            (repo / ".openclaw-sync").mkdir()
-            (repo / "docs/fr").mkdir(parents=True)
-            (repo / "docs/note.md").write_text("<Note>Take care</Note>\n", encoding="utf-8")
-            run_git(repo, "add", ".")
-            run_git(repo, "commit", "-m", "initial")
-
-            # The unclosed element is deterministic-rescueable, so the page is
-            # salvaged and packaged even though the relay reported it failed.
-            (repo / "docs/fr/note.md").write_text("<Note>Prendre soin\n", encoding="utf-8")
-            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(f"{repo / 'docs/note.md'}\n", encoding="utf-8")
-
-            with chdir(repo), env(
-                {
-                    "GITHUB_WORKSPACE": str(repo),
-                    "LOCALE": "fr",
-                    "LOCALE_SLUG": "fr",
-                    "SOURCE_SHA": "source-a",
-                    "MODE": "full",
-                    "SHARD_INDEX": "0",
-                    "SHARD_TOTAL": "1",
-                    "WORKER_PARALLEL": "3",
-                    "THINKING_EFFORT": "xhigh",
-                    "PENDING_COUNT": "1",
-                    "TOTAL_PENDING_COUNT": "1",
-                    "ALL_COUNT": "1",
-                    "TRANSLATE_OUTCOME": "success",
-                    "MDX_CHECK_OUTCOME": "failure",
-                    "MDX_REPAIR_OUTCOME": "success",
-                    "MDX_SCOPE_OUTCOME": "success",
-                    "MDX_RECHECK_OUTCOME": "failure",
-                    "MDX_REPAIR_FINAL_OUTCOME": "partial_success",
-                    "MDX_REPAIR_FAILURE_KIND": "compile_failed",
-                    "MDX_REPAIR_MODE": "relay",
-                    "MDX_REPAIR_ROUNDS": "1",
-                    "MDX_REPAIR_FAILED_PATHS": "docs/fr/note.md",
-                }
-            ):
-                metadata = package_artifact.package_artifact(repo, Path(".openclaw-sync"))
-
-            artifact = repo / ".openclaw-sync/artifacts/fr-s0of1"
-            self.assertEqual("", metadata["failed_reason"])
-            self.assertEqual(["docs/fr/note.md"], (artifact / "changed-files.txt").read_text(encoding="utf-8").splitlines())
-            self.assertEqual("<Note>Prendre soin</Note>\n", (artifact / "payload/docs/fr/note.md").read_text(encoding="utf-8"))
-            self.assertEqual("success", metadata["mdx_syntax_repair_outcome"])
-            # Every relay-failed page was rescued, so the shard result is a
-            # full success.
-            self.assertEqual("success", metadata["mdx_repair_final_outcome"])
-            self.assertEqual([], metadata["mdx_repair_failed_paths"])
-
-    def test_package_artifact_repair_relay_metadata_on_clean_shard(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            init_repo(repo)
-            (repo / ".openclaw-sync").mkdir()
-            (repo / "docs").mkdir()
-            (repo / "docs/index.md").write_text("# Index\n", encoding="utf-8")
-            run_git(repo, "add", ".")
-            run_git(repo, "commit", "-m", "initial")
-            (repo / "docs/fr").mkdir()
-            (repo / "docs/fr/index.md").write_text("# Index FR\n", encoding="utf-8")
-            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(str(repo / "docs/index.md") + "\n", encoding="utf-8")
-
-            with chdir(repo), env(
-                {
-                    "GITHUB_WORKSPACE": str(repo),
-                    "LOCALE": "fr",
-                    "LOCALE_SLUG": "fr",
-                    "SOURCE_SHA": "source-a",
-                    "MODE": "incremental",
-                    "SHARD_INDEX": "0",
-                    "SHARD_TOTAL": "1",
-                    "WORKER_PARALLEL": "3",
-                    "THINKING_EFFORT": "medium",
-                    "PENDING_COUNT": "1",
-                    "TOTAL_PENDING_COUNT": "1",
-                    "ALL_COUNT": "1",
-                    "TRANSLATE_OUTCOME": "success",
-                    "MDX_CHECK_OUTCOME": "success",
-                    "MDX_REPAIR_OUTCOME": "skipped",
-                    "MDX_SCOPE_OUTCOME": "skipped",
-                    "MDX_RECHECK_OUTCOME": "skipped",
-                    "MDX_REPAIR_FINAL_OUTCOME": "not_run",
-                    "MDX_REPAIR_MODE": "none",
-                    "MDX_REPAIR_ROUNDS": "0",
-                }
-            ):
-                metadata = package_artifact.package_artifact(repo, Path(".openclaw-sync"))
-
-            self.assertEqual("", metadata["failed_reason"])
-            self.assertEqual("not_run", metadata["mdx_repair_final_outcome"])
-            self.assertEqual("none", metadata["mdx_repair_mode"])
-            self.assertEqual(0, metadata["mdx_repair_rounds"])
-            self.assertEqual([], metadata["mdx_repair_failed_paths"])
-            self.assertFalse((repo / ".openclaw-sync/artifacts/fr-s0of1/mdx-repair-report.json").exists())
-
-    def test_package_artifact_syntax_salvage_fails_closed_on_infrastructure_error(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            init_repo(repo)
-            (repo / ".openclaw-sync").mkdir()
-            (repo / "docs").mkdir()
-            (repo / "docs/index.md").write_text("# Index\n", encoding="utf-8")
-            run_git(repo, "add", ".")
-            run_git(repo, "commit", "-m", "initial")
-            (repo / "docs/fr").mkdir()
-            (repo / "docs/fr/index.md").write_text("# Index FR\n", encoding="utf-8")
-            (repo / ".openclaw-sync/docs-i18n-fr-s0of1.txt").write_text(str(repo / "docs/index.md") + "\n", encoding="utf-8")
-
-            with (
-                chdir(repo),
-                patch.object(package_artifact, "repair_mdx_syntax", return_value=("node crashed without page info", [], True)),
-                env(
-                    {
-                        "GITHUB_WORKSPACE": str(repo),
-                        "LOCALE": "fr",
-                        "LOCALE_SLUG": "fr",
-                        "SOURCE_SHA": "source-a",
-                        "MODE": "incremental",
-                        "SHARD_INDEX": "0",
-                        "SHARD_TOTAL": "1",
-                        "WORKER_PARALLEL": "3",
-                        "THINKING_EFFORT": "medium",
-                        "PENDING_COUNT": "1",
-                        "TOTAL_PENDING_COUNT": "1",
-                        "ALL_COUNT": "1",
-                        "TRANSLATE_OUTCOME": "success",
-                        "MDX_CHECK_OUTCOME": "success",
-                        "MDX_REPAIR_OUTCOME": "skipped",
-                        "MDX_SCOPE_OUTCOME": "skipped",
-                        "MDX_RECHECK_OUTCOME": "skipped",
-                    }
-                ),
-            ):
-                metadata = package_artifact.package_artifact(repo, Path(".openclaw-sync"))
-
-            # A salvage run that cannot name a failing page is infrastructure
-            # failure, not per-page salvage: the shard fails closed.
-            self.assertEqual("mdx syntax repair failed", metadata["failed_reason"])
-            self.assertEqual("", (repo / ".openclaw-sync/artifacts/fr-s0of1/changed-files.txt").read_text(encoding="utf-8"))
-
-    def test_apply_artifacts_reports_mdx_repair_unresolved_pages(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = self._repo_with_source(tmp)
-            artifacts = repo / ".openclaw-sync/i18n-artifacts"
-            summary = Path(tmp) / "step-summary.txt"
-            self._write_artifact(
-                artifacts,
-                "partial",
-                metadata={
-                    "failed_reason": "",
-                    "locale": "fr",
-                    "locale_slug": "fr",
-                    "mode": "incremental",
-                    "shard_index": 0,
-                    "shard_total": 1,
-                    "source_sha": "source-a",
-                    "mdx_repair_mode": "relay",
-                    "mdx_repair_rounds": 4,
-                    "mdx_repair_final_outcome": "partial_success",
-                    "mdx_repair_failed_paths": ["docs/fr/broken.md"],
-                },
-                changed=["docs/fr/index.md"],
-                payload={"docs/fr/index.md": "# Index FR\n"},
-            )
-
-            with chdir(repo), env({"GITHUB_STEP_SUMMARY": str(summary)}):
-                result = apply_artifacts.apply_artifacts(
-                    source_sha="source-a",
-                    mode="incremental",
-                    shard_total=1,
-                    expected_locales="fr=fr",
-                    artifacts_root=artifacts,
-                    skip_checkout_main=True,
-                )
-
-            # The shard applies (failed_reason stays empty) and the finalizer
-            # interprets the per-page failure marking in its summary.
-            self.assertEqual(0, result["incomplete_count"])
-            self.assertTrue((repo / "docs/fr/index.md").exists())
-            self.assertIn("mdx repair unresolved pages", summary.read_text(encoding="utf-8"))
-            self.assertIn("fr: 1 page(s) still failing strict MDX", summary.read_text(encoding="utf-8"))
 
     def test_full_summary_ignores_canary_as_locale_success_and_reports_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3362,13 +3124,7 @@ class I18NScriptTests(unittest.TestCase):
                 },
                 changed=["docs/fr/index.md"],
                 payload={
-                    "docs/fr/index.md": (
-                        "---\n"
-                        "x-i18n:\n"
-                        "  source_hash: 1111111111111111111111111111111111111111111111111111111111111111\n"
-                        "---\n\n"
-                        "# Index FR\n"
-                    )
+                    "docs/fr/index.md": self._translated_page(repo / "docs/index.md", "# Index FR\n")
                 },
             )
 
@@ -3407,7 +3163,7 @@ class I18NScriptTests(unittest.TestCase):
                     "source_sha": "source-a",
                 },
                 changed=["docs/fr/index.md"],
-                payload={"docs/fr/index.md": "# Index FR\n"},
+                payload={"docs/fr/index.md": self._translated_page(repo / "docs/index.md", "# Index FR\n")},
             )
             self._write_artifact(
                 artifacts,
@@ -3422,7 +3178,7 @@ class I18NScriptTests(unittest.TestCase):
                     "source_sha": "source-a",
                 },
                 changed=["docs/fr/guide/setup.md"],
-                payload={"docs/fr/guide/setup.md": "# Setup FR\n"},
+                payload={"docs/fr/guide/setup.md": self._translated_page(repo / "docs/guide/setup.md", "# Setup FR\n")},
             )
 
             with chdir(repo):
@@ -3439,66 +3195,88 @@ class I18NScriptTests(unittest.TestCase):
             self.assertIn("Index FR", (repo / "docs/fr/index.md").read_text(encoding="utf-8"))
             self.assertIn("Setup FR", (repo / "docs/fr/guide/setup.md").read_text(encoding="utf-8"))
 
-    def test_apply_artifacts_leaves_locale_unchanged_when_one_stale_page_changed(self) -> None:
+    def test_artifact_preflight_preserves_current_source_tm_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, chdir(Path(tmp)):
+            artifact = Path(tmp) / "artifact"
+            for source_current in (True, False):
+                for kind, rel in (
+                    ("changed", "docs/.i18n/fr.tm.jsonl"),
+                    ("deleted", "docs/.i18n/fr.tm.jsonl"),
+                ):
+                    with self.subTest(source_current=source_current, kind=kind, rel=rel):
+                        if artifact.exists():
+                            shutil.rmtree(artifact)
+                        self._write_artifact(Path(tmp), "artifact", **{kind: [rel]}, payload={rel: "payload without source hash\n"} if kind == "changed" else {})
+                        issue = apply_artifacts.artifact_stale_issue(artifact, "fr", source_current)
+                        self.assertEqual(source_current, issue == "")
+
+    def test_apply_artifacts_checks_page_sources_across_all_locale_shards(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            repo = self._repo_with_source(tmp)
-            (repo / "docs/guide.md").write_text("# Current guide\n", encoding="utf-8")
-            (repo / "docs/fr").mkdir()
-            (repo / "docs/fr/index.md").write_text("# Existing index FR\n", encoding="utf-8")
-            (repo / "docs/fr/guide.md").write_text("# Existing guide FR\n", encoding="utf-8")
-            (repo / ".openclaw-sync/source.json").write_text(
-                '{"repository":"openclaw/openclaw","sha":"source-b"}\n',
-                encoding="utf-8",
-            )
-            run_git(repo, "add", ".")
-            run_git(repo, "commit", "-m", "move source")
-            index_hash = hashlib.sha256((repo / "docs/index.md").read_bytes()).hexdigest()
-            artifacts = repo / ".openclaw-sync/i18n-artifacts"
-            self._write_artifact(
-                artifacts,
-                "fr-s0of1",
-                metadata={
-                    "failed_reason": "",
-                    "locale": "fr",
-                    "locale_slug": "fr",
-                    "mode": "full",
-                    "shard_index": 0,
-                    "shard_total": 1,
-                    "source_sha": "source-a",
+            root = Path(tmp)
+            seed = root / "seed"
+            seed.mkdir()
+            self._repo_with_source(str(seed))
+            (seed / "docs/clawhub").mkdir()
+            (seed / "docs/clawhub/guide.mdx").write_text("# Current ClawHub guide\n")
+            (seed / "docs/clawhub/data.json").write_text('{"current":true}\n')
+            (seed / "docs/fr/clawhub").mkdir(parents=True)
+            (seed / "docs/fr/clawhub/guide.mdx").write_text("# Existing guide FR\n")
+            (seed / "docs/fr/index.md").write_text("# Existing index FR\n")
+            (seed / "docs/fr/orphan.md").write_text("# Valid deletion once locale passes\n")
+            (seed / "docs/.i18n").mkdir()
+            (seed / "docs/.i18n/fr.tm.jsonl").write_text('{"original":"memory"}\n')
+            (seed / ".openclaw-sync/source.json").write_text(json.dumps({
+                "repository": "openclaw/openclaw", "sha": "stable-core",
+                "sources": {
+                    "openclaw": {"repository": "openclaw/openclaw", "sha": "stable-core"},
+                    "clawhub": {"repository": "openclaw/clawhub", "sha": "after-retirement"},
                 },
-                changed=["docs/fr/index.md", "docs/fr/guide.md"],
-                payload={
-                    "docs/fr/index.md": (
-                        "---\n"
-                        "x-i18n:\n"
-                        f"  source_hash: {index_hash}\n"
-                        "---\n\n"
-                        "# Updated index FR\n"
-                    ),
-                    "docs/fr/guide.md": (
-                        "---\n"
-                        "x-i18n:\n"
-                        f"  source_hash: {'0' * 64}\n"
-                        "---\n\n"
-                        "# Stale guide FR\n"
-                    ),
-                },
+            }) + "\n")
+            run_git(seed, "add", ".")
+            run_git(seed, "commit", "-m", "secondary source after retirement")
+            origin = root / "origin.git"
+            run_git(root, "init", "--bare", "-b", "main", str(origin))
+            run_git(seed, "remote", "add", "origin", str(origin))
+            run_git(seed, "push", "origin", "main")
+            guide = self._translated_page(seed / "docs/clawhub/guide.mdx", "# Updated guide FR\n")
+            old_hash = hashlib.sha256(b"# Old ClawHub English\n").hexdigest()
+            old_page = f"---\nx-i18n:\n  source_hash: {old_hash}\n---\n# Old translation\n"
+            cases = (
+                ("same_sha_retired", "stable-core", "clawhub/retired.md", old_page, False),
+                ("same_sha_changed", "stable-core", "clawhub/guide.mdx", old_page, False),
+                ("stale_sha_changed", "old-core", "clawhub/guide.mdx", old_page, False),
+                ("missing_hash", "stable-core", "clawhub/guide.mdx", "# No source hash\n", False),
+                ("non_markdown", "stable-core", "clawhub/data.json", self._translated_page(seed / "docs/clawhub/data.json", "data\n"), False),
+                ("current_valid", "stable-core", "clawhub/guide.mdx", guide, True),
+                ("stale_valid", "old-core", "clawhub/guide.mdx", guide, True),
             )
-
-            with chdir(repo):
-                result = apply_artifacts.apply_artifacts(
-                    source_sha="source-a",
-                    mode="full",
-                    shard_total=1,
-                    expected_locales="fr=fr",
-                    artifacts_root=artifacts,
-                    skip_checkout_main=True,
-                )
-
-            self.assertEqual(1, result["incomplete_count"])
-            self.assertEqual(0, result["changed_count"])
-            self.assertEqual("# Existing index FR\n", (repo / "docs/fr/index.md").read_text(encoding="utf-8"))
-            self.assertEqual("# Existing guide FR\n", (repo / "docs/fr/guide.md").read_text(encoding="utf-8"))
+            for case, source_sha, relative, page, valid in cases:
+                with self.subTest(case=case):
+                    repo = root / case
+                    run_git(root, "clone", str(origin), str(repo))
+                    before = self._docs_bytes(repo)
+                    artifacts = repo / ".openclaw-sync/i18n-artifacts"
+                    metadata = {"failed_reason": "", "locale": "fr", "locale_slug": "fr", "mode": "full", "shard_total": 2, "source_sha": source_sha}
+                    payload = {"docs/fr/index.md": self._translated_page(seed / "docs/index.md", "# Updated index FR\n")}
+                    if source_sha == "stable-core":
+                        payload["docs/.i18n/fr.tm.jsonl"] = '{"updated":"memory"}\n'
+                    self._write_artifact(artifacts, "fr-s0of2", metadata={**metadata, "shard_index": 0}, changed=list(payload), deleted=["docs/fr/orphan.md"], payload=payload)
+                    self._write_artifact(artifacts, "fr-s1of2", metadata={**metadata, "shard_index": 1}, changed=[f"docs/fr/{relative}"], payload={f"docs/fr/{relative}": page})
+                    result = self._retirement_cli(repo, root, {}, "apply_artifacts.py", "--source-sha", source_sha, "--mode", "full", "--shard-total", "2", "--expected-locales", "fr=fr", "--artifacts-root", str(artifacts))
+                    self.assertEqual("stable-core", result["base_source_sha"])
+                    self.assertFalse((repo / "docs/clawhub/retired.md").exists())
+                    self.assertFalse((repo / "docs/fr/clawhub/retired.md").exists(), "old wave must not resurrect a retired page")
+                    if valid:
+                        expected = {**before, **{rel: text.encode() for rel, text in payload.items()}, f"docs/fr/{relative}": page.encode()}
+                        del expected["docs/fr/orphan.md"]
+                        self.assertEqual(expected, self._docs_bytes(repo))
+                        self.assertEqual("0", result["incomplete_count"])
+                        self.assertEqual(str(len(payload) + 2), result["changed_count"])
+                    else:
+                        self.assertEqual(before, self._docs_bytes(repo), "invalid page must block every shard's updates, TM and deletions")
+                        self.assertEqual("0", result["changed_count"])
+                        self.assertEqual("1", result["incomplete_count"])
+                        self.assertIn(f"docs/fr/{relative}", (repo / ".openclaw-sync/i18n-incomplete-locales.txt").read_text())
 
     def test_apply_artifacts_leaves_incomplete_locale_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3523,7 +3301,7 @@ class I18NScriptTests(unittest.TestCase):
                 },
                 changed=["docs/fr/index.md"],
                 deleted=["docs/fr/removed.md"],
-                payload={"docs/fr/index.md": "# Updated FR\n"},
+                payload={"docs/fr/index.md": self._translated_page(repo / "docs/index.md", "# Updated FR\n")},
             )
             self._write_artifact(
                 artifacts,
@@ -3571,7 +3349,7 @@ class I18NScriptTests(unittest.TestCase):
                     "source_sha": "source-a",
                 },
                 changed=["docs/fr/index.md"],
-                payload={"docs/fr/index.md": "# Index FR\n"},
+                payload={"docs/fr/index.md": self._translated_page(repo / "docs/index.md", "# Index FR\n")},
             )
             self._write_artifact(
                 artifacts,
@@ -3628,7 +3406,7 @@ class I18NScriptTests(unittest.TestCase):
                     "source_sha": "source-a",
                 },
                 changed=["docs/fr/index.md"],
-                payload={"docs/fr/index.md": "# Updated FR\n"},
+                payload={"docs/fr/index.md": self._translated_page(repo / "docs/index.md", "# Updated FR\n")},
             )
             self._write_artifact(
                 artifacts,
@@ -3713,6 +3491,452 @@ class I18NScriptTests(unittest.TestCase):
             self.assertEqual(1, result["incomplete_count"])
             self.assertIn("fr: translation failed", incomplete)
 
+    def test_finalizer_commit_rechecks_metadata_after_aggregate_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed = root / "seed"
+            seed.mkdir()
+            self._repo_with_source(str(seed))
+            origin = root / "origin.git"
+            run_git(root, "init", "--bare", "-b", "main", str(origin))
+            run_git(seed, "remote", "add", "origin", str(origin))
+            run_git(seed, "push", "origin", "main")
+            workflow = "translate-finalize-reusable.yml"
+            for case in ("unchanged", "unrelated_main", "restored_secondary", "metadata_refresh", "missing_metadata"):
+                with self.subTest(case=case):
+                    run_git(seed, "fetch", "origin", "main")
+                    run_git(seed, "merge", "--ff-only", "origin/main")
+                    (seed / "docs/fr/clawhub").mkdir(parents=True, exist_ok=True)
+                    (seed / "docs/fr/clawhub/retired.md").write_text("# Retired FR\n")
+                    (seed / "docs/clawhub").mkdir(exist_ok=True)
+                    (seed / "docs/clawhub/retired.md").unlink(missing_ok=True)
+                    metadata = {
+                        "repository": "openclaw/openclaw", "sha": "stable-core",
+                        "sources": {"clawhub": {"repository": "openclaw/clawhub", "sha": "retired"}},
+                    }
+                    source_json = seed / ".openclaw-sync/source.json"
+                    source_json.write_text(json.dumps(metadata) + "\n")
+                    run_git(seed, "add", "docs", ".openclaw-sync/source.json")
+                    run_git(seed, "commit", "--allow-empty", "-m", "fixture retirement admission")
+                    run_git(seed, "push", "origin", "main")
+                    repo = root / case
+                    run_git(root, "clone", str(origin), str(repo))
+                    run_git(repo, "config", "commit.gpgsign", "false")
+                    artifacts = repo / ".openclaw-sync/artifacts"
+                    self._write_artifact(artifacts, "fr-s0of1", metadata={
+                        "locale": "fr", "locale_slug": "fr", "source_sha": "stable-core",
+                        "shard_index": 0, "shard_total": 1, "failed_reason": "",
+                    }, deleted=["docs/fr/clawhub/retired.md"])
+                    applied = self._retirement_cli(repo, root, {}, "apply_artifacts.py", "--source-sha", "stable-core", "--mode", "retirements", "--shard-total", "1", "--expected-locales", "fr=fr", "--artifacts-root", str(artifacts))
+                    self.assertEqual("1", applied["changed_count"])
+                    self.assertEqual("0", applied["incomplete_count"])
+                    admitted_oid = run_git(repo, "rev-parse", "HEAD:.openclaw-sync/source.json").strip()
+                    self.assertEqual(admitted_oid, applied["base_source_metadata_oid"])
+                    self.assertEqual(json.loads(run_git(repo, "cat-file", "blob", admitted_oid))["sha"], applied["base_source_sha"])
+                    # Simulate a remote update during the awaited docs:check.
+                    if case == "restored_secondary":
+                        (seed / "docs/clawhub/retired.md").write_text("# Restored English\n")
+                        metadata["sources"]["clawhub"]["sha"] = "restored"
+                        source_json.write_text(json.dumps(metadata) + "\n")
+                    elif case == "metadata_refresh":
+                        metadata["syncedAt"] = "later sync with identical sources"
+                        source_json.write_text(json.dumps(metadata) + "\n")
+                    elif case == "missing_metadata":
+                        source_json.unlink()
+                    elif case == "unrelated_main":
+                        (seed / "unrelated.txt").write_text("Unrelated main change\n")
+                    if case != "unchanged":
+                        run_git(seed, "add", ".")
+                        run_git(seed, "commit", "-m", "fixture update during validation")
+                        run_git(seed, "push", "origin", "main")
+                    remote_before = run_git(origin, "rev-parse", "main").strip()
+                    values = {f"steps.apply.outputs.{key}": value for key, value in applied.items()}
+                    self._retirement_step(repo, root, values, "Commit aggregate translation refresh", workflow_name=workflow)
+                    published = case in {"unchanged", "unrelated_main"}
+                    self.assertEqual("true" if published else None, values.get("steps.aggregate_commit.outputs.committed"))
+                    paths = run_git(origin, "ls-tree", "-r", "--name-only", "main").splitlines()
+                    self.assertEqual(not published, "docs/fr/clawhub/retired.md" in paths)
+                    if published:
+                        self.assertNotEqual(remote_before, run_git(origin, "rev-parse", "main").strip())
+                        run_git(origin, "merge-base", "--is-ancestor", remote_before, "main")
+                        if case == "unrelated_main":
+                            self.assertIn("unrelated.txt", paths)
+                    else:
+                        self.assertEqual(remote_before, run_git(origin, "rev-parse", "main").strip())
+                        failure = self._retirement_step(repo, root, values, "Fail uncommitted aggregate translation refresh", workflow_name=workflow, succeeds=False)
+                        self.assertIn("did not commit them", failure.stderr)
+
+    def test_retirement_workflow_cleans_all_locales_without_translation_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, runner, values, seed, origin = self._retirement_fixture(Path(tmp))
+            # The literal main checkout admits the source before prepare records it.
+            (seed / "docs/new.md").write_text("# New source\n", encoding="utf-8")
+            run_git(seed, "add", "docs/new.md")
+            run_git(seed, "commit", "-m", "new publish revision")
+            run_git(seed, "push", "origin", "main")
+            self._prepare_retirements(repo, runner, values)
+            selected_ref = run_git(seed, "rev-parse", "HEAD").strip()
+            selected_metadata = (repo / ".openclaw-sync/source.json").read_bytes()
+            (seed / ".openclaw-sync/source.json").write_text('{"repository":"openclaw/openclaw","sha":"source-b"}\n')
+            run_git(seed, "add", ".openclaw-sync/source.json")
+            run_git(seed, "commit", "-m", "remote main moves after checkout")
+            run_git(seed, "push", "origin", "main")
+            self._retirement_step(repo, runner, values, "Record checked-out source snapshot")
+            self._retirement_step(repo, runner, values, "Validate selected source pair")
+            self.assertEqual(selected_ref, values["steps.prepare.outputs.publish_ref"])
+            self.assertEqual("source-a", values["steps.prepare.outputs.source_sha"])
+            self.assertEqual("false", values["steps.prepare.outputs.should_translate"])
+            self.assertEqual(selected_ref, run_git(repo, "rev-parse", "refs/remotes/origin/main").strip(), "recording must not fetch")
+            self.assertEqual(selected_ref, run_git(repo, "rev-parse", "HEAD").strip())
+            self.assertEqual(selected_metadata, (repo / ".openclaw-sync/source.json").read_bytes())
+            # Existing translation lanes still fetch the newest main, without
+            # changing the retirement producer's admitted checkout.
+            for mode in ("full", "incremental"):
+                preparation = self._retirement_cli(repo, runner, {**values, "EVENT_NAME": "workflow_dispatch", "REQUESTED_COOLDOWN_SECONDS": "0"}, "prepare.py", "--mode", mode, "--title", "Fixture translation")
+                self.assertEqual(run_git(seed, "rev-parse", "HEAD").strip(), preparation["publish_ref"])
+                self.assertEqual("source-b", preparation["source_sha"])
+                self.assertEqual("true", preparation["should_translate"])
+                self.assertEqual(selected_ref, run_git(repo, "rev-parse", "HEAD").strip())
+            self._retirement_step(repo, runner, values, "Prune and package every locale")
+            self._retirement_step(repo, runner, values, "Require a complete deletion-only bundle")
+            for item in translation_plan.all_locales():
+                self.assertTrue((repo / f"docs/{item.locale}/orphan/keep.md").is_file(), "unselected orphan must survive retirement")
+                self.assertEqual(b"", (repo / f".openclaw-sync/docs-i18n-{item.locale_slug}-s0of1.txt").read_bytes())
+            self.assertFalse((repo / "docs/fr/retired").exists())
+            self.assertTrue((repo / "docs/fr/unrelated-empty").is_dir())
+            self.assertTrue((repo / "docs/fr/never-translated").is_dir())
+            self.assertFalse((repo / "not-evaluated").exists())
+            selected = json.loads(Path(values["GITHUB_EVENT_PATH"]).read_text())["inputs"]["source_paths"].splitlines()
+            self.assertEqual(selected, json.loads((runner / "retirements-source-paths.json").read_text()))
+            summary = (runner / "summary").read_text()
+            self.assertIn(f"Selected source paths: {len(selected)}", summary)
+            for path in selected:
+                self.assertIn(path, summary)
+            self.assertEqual(selected_ref, values["steps.prepare.outputs.publish_ref"])
+
+            # The old lane still schedules model work for stale/missing surviving
+            # pages, even when the operator only needs source retirements.
+            legacy = {**values, "LOCALE": "fr", "LOCALE_SLUG": "fr", "MODE": "incremental", "SHARD_INDEX": "0", "SHARD_TOTAL": "1"}
+            pending_output = self._retirement_cli(repo, runner, legacy, "build_pending_manifest.py")
+            self.assertGreater(int(pending_output["pending_count"]), 0)
+            workflow = (REPO_ROOT / ".github/workflows/translate-retirements.yml").read_text(encoding="utf-8")
+            incremental = (REPO_ROOT / ".github/workflows/translate-incremental.yml").read_text(encoding="utf-8")
+            self.assertIn("- provider-preflight", incremental)
+            self.assertNotIn("provider-preflight", workflow)
+            self.assertNotIn("translate-locale-reusable.yml", workflow)
+            self.assertNotIn("strategy:", workflow)
+            self.assertRegex(workflow, r"on:\n  workflow_dispatch:\n    inputs:\n      source_paths:")
+            self.assertIn("group: docs-i18n-retirements\n  cancel-in-progress: false", workflow)
+            self.assertIn("ref: ${{ github.workflow_sha }}", workflow)
+            self.assertEqual(["${{ github.workflow_sha }}", "main"], re.findall(r"^          ref: (.+)$", workflow, re.M))
+            self.assertEqual(2, workflow.count("uses: actions/checkout@"))
+            self.assertLess(workflow.index("Stage workflow scripts"), workflow.index("Check out trusted main snapshot"))
+            self.assertLess(workflow.index("Check out trusted main snapshot"), workflow.index("Record checked-out source snapshot"))
+            self.assertIn("needs: produce\n    uses: ./.github/workflows/translate-finalize-reusable.yml", workflow)
+            self.assertNotIn("expected_locales:", workflow)  # Keep the finalizer's complete default.
+            self.assertLess(workflow.index("Require a complete deletion-only bundle"), workflow.index("uses: actions/upload-artifact"))
+
+            locales = translation_plan.all_locales()
+            self.assertEqual({item.locale_slug: item.locale for item in locales}, apply_artifacts.parse_expected(apply_artifacts.DEFAULT_EXPECTED_LOCALES))
+            artifacts = repo / ".openclaw-sync/artifacts"
+            self.assertEqual(len(locales), len(list(artifacts.iterdir())))
+            intended = {f"docs/{item.locale}/retired/old.md" for item in locales[:-1]}
+            for item in locales:
+                artifact = artifacts / f"{item.locale_slug}-s0of1"
+                metadata = json.loads((artifact / "metadata.json").read_text())
+                self.assertEqual("", metadata["failed_reason"])
+                self.assertEqual(0, metadata["pending_count"])
+                self.assertEqual("skipped", metadata["mdx_protected_attribute_repair_outcome"])
+                self.assertEqual(b"", (artifact / "changed-files.txt").read_bytes())
+                self.assertEqual([], list((artifact / "payload").rglob("*")))
+                expected = [f"docs/{item.locale}/retired/old.md"] if item != locales[-1] else []
+                self.assertEqual(expected, (artifact / "deleted-files.txt").read_text().splitlines())
+                self.assertIn(f"- {item.locale}: {len(expected)} deletions", summary)
+
+            consumer = runner / "consumer"
+            run_git(runner, "clone", str(origin), str(consumer))
+            before = self._docs_bytes(consumer)
+            result = self._apply_retirement_bundle(consumer, runner, values, artifacts)
+            self.assertEqual("0", result["incomplete_count"])
+            self.assertEqual(str(len(intended)), result["changed_count"])
+            expected_bytes = {path: content for path, content in before.items() if path not in intended}
+            self.assertEqual(expected_bytes, self._docs_bytes(repo))
+            self.assertEqual(expected_bytes, self._docs_bytes(consumer))
+            self.assertEqual(intended, set(run_git(consumer, "diff", "--name-only", "--", "docs").splitlines()))
+            self.assertEqual("", run_git(consumer, "diff", "--name-only", "--diff-filter=ACMRT", "--", "docs"))
+            # Simulate the finalizer's published cleanup in the local bare origin,
+            # then run the producer again: every locale must now be a valid no-op.
+            run_git(consumer, "config", "user.name", "Test")
+            run_git(consumer, "config", "user.email", "test@example.com")
+            run_git(consumer, "config", "commit.gpgsign", "false")
+            run_git(consumer, "add", "docs")
+            run_git(consumer, "commit", "-m", "fixture aggregate retirements")
+            run_git(consumer, "push", "origin", "main")
+            shutil.rmtree(artifacts)
+            self._produce_retirements(repo, runner, values)
+            for item in locales:
+                artifact = artifacts / f"{item.locale_slug}-s0of1"
+                self.assertEqual(b"", (artifact / "deleted-files.txt").read_bytes())
+                self.assertEqual(0, json.loads((artifact / "metadata.json").read_text())["deleted_count"])
+            shutil.rmtree(consumer / ".openclaw-sync/current-artifacts")
+            second = self._apply_retirement_bundle(consumer, runner, values, artifacts)
+            self.assertEqual("0", second["incomplete_count"])
+            self.assertEqual("0", second["changed_count"])
+            self.assertEqual(expected_bytes, self._docs_bytes(consumer))
+            self.assertFalse((runner / "forbidden-runtime-called").exists())
+
+    def test_retirement_upload_gate_rejects_incomplete_or_non_deletion_bundles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, runner, values, _seed, _origin = self._retirement_fixture(Path(tmp))
+            self._prepare_retirements(repo, runner, values)
+            event = Path(values["GITHUB_EVENT_PATH"])
+            valid_event = event.read_bytes()
+            outside = runner / "outside"
+            outside.mkdir()
+            (outside / "escape.md").write_text("outside must remain unchanged\n")
+            first_locale = repo / "docs" / translation_plan.all_locales()[0].locale
+            source_alias, locale_alias = repo / "docs/source-alias", first_locale / "locale-alias"
+            source_alias.symlink_to(outside, target_is_directory=True)
+            locale_alias.symlink_to(outside, target_is_directory=True)
+            (first_locale / "directory.md").mkdir()
+            before = self._docs_bytes(repo)
+            directories = {path for path in (repo / "docs").rglob("*") if path.is_dir()}
+            invalid = ["", " \t\r\n\n"] + [
+                "retired/old.md\n" + path for path in (
+                    "retired/old.md", "../escape.md", str(outside / "escape.md"), "C:/escape.md",
+                    "retired//old.md", "retired/./old.md", "retired\\old.md", "zh-cn/index.md",
+                    ".i18n/state.md", "concepts/.generated/state.md", "old.png", "index.md",
+                    "source-alias/missing.md", "locale-alias/escape.md", "directory.md", "bad\tname.md", "bad\0name.md",
+                )
+            ]
+            for selection in invalid:
+                with self.subTest(selection=selection):
+                    event.write_text(json.dumps({"inputs": {"source_paths": selection}}))
+                    self._retirement_step(repo, runner, values, "Prune and package every locale", succeeds=False)
+                    self.assertEqual(before, self._docs_bytes(repo), "invalid selection must fail before any deletion")
+                    self.assertEqual(directories, {path for path in (repo / "docs").rglob("*") if path.is_dir()})
+                    self.assertEqual("outside must remain unchanged\n", (outside / "escape.md").read_text())
+                    self.assertFalse((repo / ".openclaw-sync/artifacts").exists())
+            source_alias.unlink()
+            locale_alias.unlink()
+            (first_locale / "directory.md").rmdir()
+            event.write_bytes(valid_event)
+            self._retirement_step(repo, runner, values, "Prune and package every locale")
+            self._retirement_step(repo, runner, values, "Require a complete deletion-only bundle")
+            artifacts = repo / ".openclaw-sync/artifacts"
+            artifact = artifacts / "fr-s0of1"
+            originals = {path: path.read_bytes() for path in artifact.iterdir() if path.is_file()}
+            empty_locale = artifacts / f"{translation_plan.all_locales()[-1].locale_slug}-s0of1"
+            for field in ("source_sha", "source_repository"):
+                with self.subTest(source_pair_field=field):
+                    mismatch = {**values, f"steps.prepare.outputs.{field}": "mismatched"}
+                    self._retirement_step(repo, runner, mismatch, "Validate selected source pair", succeeds=False)
+            cases = ("missing_empty_locale", "failed", "changed_count", "changed_manifest", "pending_work", "tm_delete", "other_locale_delete", "unsafe_delete", "unselected_delete", "payload")
+            for case in cases:
+                with self.subTest(case=case):
+                    metadata_path = artifact / "metadata.json"
+                    metadata = json.loads(metadata_path.read_text())
+                    if case == "missing_empty_locale":
+                        empty_locale.rename(runner / empty_locale.name)
+                    elif case == "failed":
+                        metadata["failed_reason"] = "packaging failed"
+                    elif case == "changed_count":
+                        metadata["changed_count"] = 1
+                    elif case == "changed_manifest":
+                        (artifact / "changed-files.txt").write_text("docs/fr/index.md\n")
+                    elif case == "pending_work":
+                        metadata["pending_count"] = 1
+                    elif case.endswith("delete"):
+                        path = {"tm_delete": "docs/.i18n/fr.tm.jsonl", "other_locale_delete": "docs/de/retired/old.md", "unsafe_delete": "docs/fr/../index.md", "unselected_delete": "docs/fr/orphan/keep.md"}[case]
+                        (artifact / "deleted-files.txt").write_text(path + "\n")
+                    elif case == "payload":
+                        (artifact / "payload/unlisted.md").write_text("unadvertised payload\n")
+                    metadata_path.write_text(json.dumps(metadata))
+                    try:
+                        self._retirement_step(repo, runner, values, "Require a complete deletion-only bundle", succeeds=False)
+                    finally:
+                        for path, content in originals.items():
+                            path.write_bytes(content)
+                        (artifact / "payload/unlisted.md").unlink(missing_ok=True)
+                        if not empty_locale.exists():
+                            (runner / empty_locale.name).rename(empty_locale)
+
+    def test_retirement_finalizer_rejects_missing_failed_and_restored_source_deletes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, runner, values, seed, origin = self._retirement_fixture(Path(tmp))
+            self._produce_retirements(repo, runner, values)
+            source_artifacts = repo / ".openclaw-sync/artifacts"
+            for case in ("missing", "failed", "wrong_source", "restored_same_source", "restored_new_source"):
+                with self.subTest(case=case):
+                    restored = case.startswith("restored_")
+                    if restored:
+                        (seed / "docs/retired").mkdir(exist_ok=True)
+                        (seed / "docs/retired/old.md").write_text("# Restored English\n")
+                        primary_sha = "source-a" if case == "restored_same_source" else "source-b"
+                        (seed / ".openclaw-sync/source.json").write_text(json.dumps({
+                            "repository": "openclaw/openclaw", "sha": primary_sha,
+                            "sources": {
+                                "openclaw": {"repository": "openclaw/openclaw", "sha": primary_sha},
+                                "clawhub": {"repository": "openclaw/clawhub", "sha": "clawhub-restored"},
+                            },
+                        }) + "\n")
+                        run_git(seed, "add", "docs", ".openclaw-sync/source.json")
+                        run_git(seed, "commit", "-m", "restore source page")
+                        run_git(seed, "push", "origin", "main")
+                    consumer = runner / case
+                    run_git(runner, "clone", str(origin), str(consumer))
+                    before = self._docs_bytes(consumer)
+                    artifacts = runner / f"{case}-artifacts"
+                    shutil.copytree(source_artifacts, artifacts)
+                    french = artifacts / "fr-s0of1"
+                    if case == "missing":
+                        shutil.rmtree(french)
+                    elif case in {"failed", "wrong_source"}:
+                        metadata_path = french / "metadata.json"
+                        metadata = json.loads(metadata_path.read_text())
+                        metadata["failed_reason" if case == "failed" else "source_sha"] = "failed" if case == "failed" else "other-source"
+                        metadata_path.write_text(json.dumps(metadata))
+                    elif restored:
+                        # A valid update must also stay unapplied when this locale's
+                        # deletion targets restored English, even with the same core SHA.
+                        index_hash = hashlib.sha256((consumer / "docs/index.md").read_bytes()).hexdigest()
+                        payload = french / "payload/docs/fr/index.md"
+                        payload.parent.mkdir(parents=True)
+                        payload.write_text(f"---\nx-i18n:\n  source_hash: {index_hash}\n---\n# Updated index\n")
+                        (french / "changed-files.txt").write_text("docs/fr/index.md\n")
+                        metadata_path = french / "metadata.json"
+                        metadata = json.loads(metadata_path.read_text())
+                        metadata["changed_count"] = 1
+                        metadata_path.write_text(json.dumps(metadata))
+                    result = self._apply_retirement_bundle(consumer, runner, values, artifacts)
+                    self.assertGreater(int(result["incomplete_count"]), 0)
+                    self.assertEqual(before["docs/fr/retired/old.md"], (consumer / "docs/fr/retired/old.md").read_bytes())
+                    if restored:
+                        self.assertEqual(primary_sha, result["base_source_sha"])
+                        self.assertEqual("0", result["changed_count"])
+                        self.assertEqual(before, self._docs_bytes(consumer))
+                        self.assertIn("stale payload", (consumer / ".openclaw-sync/i18n-incomplete-locales.txt").read_text())
+                    else:
+                        self.assertFalse((consumer / "docs/de/retired/old.md").exists())
+                    for item in translation_plan.all_locales():
+                        for rel in (f"docs/{item.locale}/orphan/keep.md", f"docs/{item.locale}/index.md", f"docs/.i18n/{item.locale}.tm.jsonl"):
+                            self.assertEqual(before[rel], (consumer / rel).read_bytes())
+
+    def _retirement_fixture(self, root: Path):
+        seed = root / "seed"
+        seed.mkdir()
+        self._repo_with_source(str(seed))
+        for item in translation_plan.all_locales():
+            locale = seed / "docs" / item.locale
+            locale.mkdir()
+            (locale / "index.md").write_text(f"# Surviving {item.locale}\n\n[Still linked](orphan/keep.md)\n")
+            (locale / "orphan").mkdir()
+            (locale / "orphan/keep.md").write_text(f"# Unselected orphan {item.locale}\n")
+            if item != translation_plan.all_locales()[-1]:
+                (locale / "retired").mkdir()
+                (locale / "retired/old.md").write_text(f"# Retired {item.locale}\n")
+            tm = seed / f"docs/.i18n/{item.locale}.tm.jsonl"
+            tm.parent.mkdir(exist_ok=True)
+            tm.write_bytes(b'{"unchanged":"memory"}\n')
+        run_git(seed, "add", "docs")
+        run_git(seed, "commit", "-m", "stale locale fixtures")
+        origin = root / "origin.git"
+        run_git(root, "init", "--bare", "-b", "main", str(origin))
+        run_git(seed, "remote", "add", "origin", str(origin))
+        run_git(seed, "push", "origin", "main")
+        repo = root / "producer"
+        run_git(root, "clone", str(origin), str(repo))
+        (repo / "docs/fr/unrelated-empty").mkdir()
+        (repo / "docs/fr/never-translated").mkdir()
+        runner = root / "runner"
+        runner.mkdir()
+        scripts = repo / ".openclaw-sync/workflow-ref/.github/scripts/i18n"
+        shutil.copytree(SCRIPT_DIR, scripts)
+        # Block runtime entry points without changing any production script.
+        commands = runner / "bin"
+        commands.mkdir()
+        (commands / "python").symlink_to(sys.executable)
+        for command in ("node", "npm", "go", "codex"):
+            executable = commands / command
+            executable.write_text('#!/bin/sh\ntouch "$RUNNER_TEMP/forbidden-runtime-called"\nexit 99\n')
+            executable.chmod(0o755)
+        values = {"PATH": f"{commands}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(runner), "github.event_name": "workflow_dispatch"}
+        event = runner / "event.json"
+        event.write_text(json.dumps({"inputs": {"source_paths": "retired/old.md\r\nnever-translated/missing.mdx\r\nretired/$(touch not-evaluated).md\r\n"}}))
+        values["GITHUB_EVENT_PATH"] = str(event)
+        return repo, runner, values, seed, origin
+
+    def _retirement_step(self, repo: Path, runner: Path, values: dict[str, str], name: str, *, succeeds: bool = True, workflow_name: str = "translate-retirements.yml"):
+        workflow = REPO_ROOT / ".github/workflows" / workflow_name
+        blocks = [block for block in re.split(r"(?m)^      - name: ", workflow.read_text())[1:] if "        run: |\n" in block]
+        shells = runner / "shells"
+        shells.mkdir(exist_ok=True)
+        extracted = workflow_shell_check.extract_run_blocks(workflow, shells)
+        index = next(index for index, block in enumerate(blocks) if block.splitlines()[0] == name)
+        step_env = {}
+        for key, raw in re.findall(r"^          (\w+): (.+)$", blocks[index].split("        run: |\n")[0], re.M):
+            step_env[key] = values[raw[3:-2].strip()] if raw.startswith("${{") else json.loads(raw) if raw.startswith('"') else raw
+        output = runner / "output"
+        github_env = runner / "env"
+        output.write_text("")
+        github_env.write_text("")
+        process_env = {**os.environ, **values, **step_env, "GITHUB_WORKSPACE": str(repo), "GITHUB_OUTPUT": str(output), "GITHUB_ENV": str(github_env), "GITHUB_STEP_SUMMARY": str(runner / "summary")}
+        result = subprocess.run(["bash", str(extracted[index])], cwd=repo, env=process_env, text=True, capture_output=True, timeout=60)
+        if succeeds:
+            self.assertEqual(0, result.returncode, f"{name}: {result.stdout}\n{result.stderr}")
+        else:
+            self.assertNotEqual(0, result.returncode, f"{name} unexpectedly succeeded")
+        values.update(dict(line.split("=", 1) for line in github_env.read_text().splitlines()))
+        outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        step_id = re.search(r"^        id: (\w+)$", blocks[index], re.M)
+        if step_id:
+            values.update({f"steps.{step_id[1]}.outputs.{key}": value for key, value in outputs.items()})
+        return result
+
+    def _prepare_retirements(self, repo: Path, runner: Path, values: dict[str, str]) -> None:
+        self._retirement_step(repo, runner, values, "Stage workflow scripts")
+        workflow = (REPO_ROOT / ".github/workflows/translate-retirements.yml").read_text()
+        checkout = workflow.split("      - name: Check out trusted main snapshot\n", 1)[1].split("      - name:", 1)[0]
+        ref = re.search(r"^          ref: (.+)$", checkout, re.M)[1]
+        self.assertEqual("main", ref)
+        # Simulate actions/checkout against the fixture's local bare origin,
+        # at the workflow's checkout boundary, before the actual prepare shell.
+        run_git(repo, "fetch", "origin", f"{ref}:refs/remotes/origin/{ref}")
+        run_git(repo, "checkout", "-B", ref, f"refs/remotes/origin/{ref}")
+        self._retirement_step(repo, runner, values, "Record checked-out source snapshot")
+        self._retirement_step(repo, runner, values, "Validate selected source pair")
+        self._retirement_step(repo, runner, values, "Plan one shard for every canonical locale")
+
+    def _produce_retirements(self, repo: Path, runner: Path, values: dict[str, str]) -> None:
+        self._prepare_retirements(repo, runner, values)
+        self._retirement_step(repo, runner, values, "Prune and package every locale")
+        self._retirement_step(repo, runner, values, "Require a complete deletion-only bundle")
+
+    def _retirement_cli(self, repo: Path, runner: Path, values: dict[str, str], script: str, *args: str) -> dict[str, str]:
+        output = runner / "cli-output"
+        output.write_text("")
+        process_env = {**os.environ, **values, "GITHUB_WORKSPACE": str(repo), "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(runner / "summary")}
+        result = subprocess.run([sys.executable, str(SCRIPT_DIR / script), *args], cwd=repo, env=process_env, text=True, capture_output=True, timeout=60)
+        self.assertEqual(0, result.returncode, f"{script}: {result.stdout}\n{result.stderr}")
+        return dict(line.split("=", 1) for line in output.read_text().splitlines())
+
+    def _apply_retirement_bundle(self, repo: Path, runner: Path, values: dict[str, str], artifacts: Path) -> dict[str, str]:
+        current = repo / ".openclaw-sync/current-artifacts"
+        if not current.exists():
+            shutil.copytree(artifacts, current / "i18n-retirements-source-a")
+        merged = repo / ".openclaw-sync/i18n-artifacts"
+        self._retirement_cli(repo, runner, values, "merge_artifact_roots.py", "--current-root", str(current), "--output-root", str(merged))
+        return self._retirement_cli(repo, runner, values, "apply_artifacts.py", "--source-sha", values["steps.prepare.outputs.source_sha"], "--mode", "retirements", "--shard-total", "1", "--artifacts-root", str(merged))
+
+    @staticmethod
+    def _docs_bytes(repo: Path) -> dict[str, bytes]:
+        return {path.relative_to(repo).as_posix(): path.read_bytes() for path in (repo / "docs").rglob("*") if path.is_file()}
+
+    @staticmethod
+    def _translated_page(source: Path, body: str) -> str:
+        source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+        return f"---\nx-i18n:\n  source_hash: {source_hash}\n---\n\n{body}"
+
     def _repo_with_source(self, tmp: str) -> Path:
         repo = Path(tmp)
         init_repo(repo)
@@ -3751,1365 +3975,6 @@ class I18NScriptTests(unittest.TestCase):
             payload_path.parent.mkdir(parents=True, exist_ok=True)
             payload_path.write_text(text, encoding="utf-8")
         return artifact
-
-
-class MdxRepairValidationWorkflowTests(unittest.TestCase):
-    """STORY-05: independent CI validation sub-pipeline structure contract."""
-
-    def _workflow_text(self) -> str:
-        return (REPO_ROOT / ".github/workflows/mdx-repair-validation.yml").read_text(encoding="utf-8")
-
-    def _dispatch_block(self, text: str) -> str:
-        match = re.search(r"(?ms)^  workflow_dispatch:\n.*?(?=^  workflow_call:)", text)
-        self.assertIsNotNone(match)
-        assert match is not None
-        return match.group(0)
-
-    def _workflow_call_block(self, text: str) -> str:
-        match = re.search(r"(?ms)^  workflow_call:\n.*?(?=^run-name:)", text)
-        self.assertIsNotNone(match)
-        assert match is not None
-        return match.group(0)
-
-    def _offline_job_block(self, text: str) -> str:
-        match = re.search(r"(?ms)^  offline-validation:\n.*?(?=^  [A-Za-z0-9_-]+:\n)", text)
-        self.assertIsNotNone(match)
-        assert match is not None
-        return match.group(0)
-
-    def _real_job_block(self, text: str) -> str:
-        match = re.search(r"(?ms)^  real-codex-relay:\n.*", text)
-        self.assertIsNotNone(match)
-        assert match is not None
-        return match.group(0)
-
-    def test_validation_workflow_supports_dispatch_and_reuse_with_real_codex_default_off(self) -> None:
-        text = self._workflow_text()
-        self.assertIn("workflow_dispatch:", text)
-        self.assertIn("workflow_call:", text)
-        dispatch = self._dispatch_block(text)
-        reusable = self._workflow_call_block(text)
-        for block in (dispatch, reusable):
-            self.assertIn("real_codex:", block)
-            self.assertIn("default: false", block)
-        # auxiliary_mode is fixed to none: dispatch offers a single-choice
-        # list, and reusable callers get a fail-closed guard at runtime.
-        self.assertIn("type: choice", dispatch)
-        options = re.search(r"(?ms)auxiliary_mode:\n.*?options:\n((?:\s+- [^\n]+\n)+)", dispatch)
-        self.assertIsNotNone(options)
-        assert options is not None
-        option_values = [line.strip("- \n") for line in options.group(1).splitlines() if line.strip()]
-        self.assertEqual(["none"], option_values)
-        self.assertIn("auxiliary_mode:", reusable)
-        self.assertIn("default: none", reusable)
-
-    def test_validation_workflow_keeps_single_entry_bounded_relay(self) -> None:
-        text = self._workflow_text()
-
-        # D-10 budgets mirror the production relay; auxiliary stays none.
-        self.assertIn('MDX_REPAIR_MAX_ATTEMPTS: "4"', text)
-        self.assertIn('MDX_REPAIR_HARD_TIMEOUT_MS: "600000"', text)
-        self.assertIn('MDX_REPAIR_AUXILIARY_MODE: "none"', text)
-
-        # Exactly one Agent entry, unrolled into at most MAX_ATTEMPTS rounds
-        # with the identical production parameter protocol; no second Codex
-        # executor and no direct model API call exists anywhere.
-        self.assertEqual(4, text.count("uses: openai/codex-action@v1"))
-        self.assertEqual(4, text.count("timeout-minutes: 12\n"))
-        self.assertEqual(4, text.count("prompt-file: .openclaw-sync/docs-mdx-repair.md"))
-        self.assertEqual(4, text.count("model: gpt-5.6"))
-        self.assertEqual(4, text.count("effort: xhigh"))
-        # No legacy --full-auto CLI flag: sandbox/approval semantics are
-        # carried by the codex-action inputs themselves (sandbox,
-        # safety-strategy), keeping the CLI call surface at the production
-        # minimum (codex 0.146.1 rejects --full-auto).
-        self.assertNotIn("full-auto", text)
-        self.assertEqual(4, text.count("sandbox: workspace-write"))
-        self.assertEqual(4, text.count("safety-strategy: drop-sudo"))
-        self.assertNotIn("codex exec", text)
-        self.assertNotIn("api.openai.com", text)
-
-        # Contract stage order: preflight -> staging -> strict check -> relay
-        # decision -> scope snapshot -> per-round (repair -> enforce scope ->
-        # recheck) -> report -> classification.
-        order = [
-            "Preflight agent credentials",
-            "Stage frozen fixture workspace",
-            "Check translated MDX",
-            "Decide MDX repair relay",
-            "Snapshot translated MDX repair scope",
-            "Repair translated MDX\n",
-            "Enforce translated MDX repair scope\n",
-            "Recheck translated MDX\n",
-            "Repair translated MDX (relay round 2)",
-            "Enforce translated MDX repair scope (relay round 2)",
-            "Recheck translated MDX (relay round 2)",
-            "Repair translated MDX (relay round 3)",
-            "Enforce translated MDX repair scope (relay round 3)",
-            "Recheck translated MDX (relay round 3)",
-            "Repair translated MDX (relay round 4)",
-            "Enforce translated MDX repair scope (relay round 4)",
-            "Recheck translated MDX (relay round 4)",
-            "Record MDX repair relay outcome",
-            "Classify validation outcome",
-        ]
-        positions = [text.index(name) for name in order]
-        self.assertEqual(sorted(positions), positions)
-
-        # Relay stop conditions: round N+1 only runs when round N's recheck
-        # still failed, so retries are bounded and diagnostics stay current.
-        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 1", text)
-        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 2", text)
-        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 3", text)
-        self.assertIn("env.MDX_REPAIR_MAX_ATTEMPTS >= 4", text)
-        self.assertIn("steps.mdx_repair.outcome == 'success' &&\n          steps.mdx_scope.outcome == 'success' && steps.mdx_recheck.outcome == 'failure'", text)
-        self.assertIn("steps.mdx_repair_2.outcome == 'success' &&\n          steps.mdx_scope_2.outcome == 'success' && steps.mdx_recheck_2.outcome == 'failure'", text)
-        self.assertIn("steps.mdx_repair_3.outcome == 'success' &&\n          steps.mdx_scope_3.outcome == 'success' && steps.mdx_recheck_3.outcome == 'failure'", text)
-
-        # Every relay round keeps the scope and strict recheck gates; the
-        # scope baseline is snapshotted once before the first repair round.
-        self.assertEqual(4, text.count("mdx_repair_scope.py enforce"))
-        self.assertEqual(1, text.count("mdx_repair_scope.py snapshot"))
-        self.assertEqual(5, text.count("node .openclaw-sync/check-docs-mdx.mjs"))
-        self.assertIn('python .github/scripts/i18n/mdx_repair_relay.py decide', text)
-        self.assertIn('python .github/scripts/i18n/mdx_repair_relay.py report', text)
-
-        # Twelve outcome tokens: three per relay round.
-        self.assertEqual(12, text.count("|| 'skipped' }}"))
-
-    def test_validation_workflow_is_read_only_and_publish_free(self) -> None:
-        text = self._workflow_text()
-        self.assertRegex(text, r"(?m)^permissions:\n  contents: read\n")
-        self.assertNotIn("contents: write", text)
-        self.assertNotIn("actions: write", text)
-        self.assertNotIn("git push", text)
-        self.assertNotIn("git commit", text)
-        self.assertNotIn("commit_locale_artifact", text)
-        self.assertNotIn("dispatch_r2_pages", text)
-        self.assertNotIn("apply_artifacts", text)
-        self.assertNotIn("package_artifact", text)
-        self.assertNotIn("persist-credentials: true", text)
-        self.assertEqual(2, text.count("persist-credentials: false"))
-
-    def test_validation_workflow_offline_job_needs_no_secrets_and_real_job_is_opt_in(self) -> None:
-        text = self._workflow_text()
-        offline = self._offline_job_block(text)
-        self.assertNotIn("secrets.", offline)
-        real = self._real_job_block(text)
-        self.assertIn("needs: offline-validation", real)
-        self.assertIn("if: inputs.real_codex == true", real)
-        # Environment failures are preflighted before any repair round so the
-        # three-state classification can never disguise them as results.
-        self.assertIn("Preflight agent credentials", real)
-        # Staging, strict check, relay decision, and the scope snapshot all
-        # stay gated on the preflight outcome.
-        self.assertEqual(
-            3,
-            real.count("steps.preflight.outputs.provider_preflight == 'ok' && steps.mdx_check.outcome == 'failure'"),
-        )
-        round_blocks = re.findall(r"(?ms)^      - name: Repair translated MDX.*?(?=^      - name:)", real)
-        self.assertEqual(4, len(round_blocks))
-        for block in round_blocks:
-            self.assertIn("uses: openai/codex-action@v1", block)
-            self.assertIn("steps.preflight.outputs.provider_preflight == 'ok'", block)
-            self.assertIn("steps.mdx_check.outcome == 'failure'", block)
-            self.assertIn("steps.mdx_relay.outputs.decision == 'run'", block)
-            self.assertIn("timeout-minutes: 12", block)
-            self.assertIn("continue-on-error: true", block)
-        self.assertIn("provider_preflight.py", real)
-
-    def test_validation_workflow_installs_production_toolchain_and_offline_gates(self) -> None:
-        text = self._workflow_text()
-        self.assertIn("npm install -g @openai/codex@0.146.1", text)
-        self.assertIn("node-version: 22", text)
-        self.assertIn("@mdx-js/mdx@3.1.1", text)
-        self.assertIn("python .github/scripts/i18n/tests/test_i18n_scripts.py", text)
-        self.assertIn("(cd tools/mdx-fallback-lab && npm test)", text)
-        self.assertIn("mdx_repair_validation.py oracle-gate", text)
-        self.assertIn("mdx_repair_validation.py single-entry", text)
-        self.assertIn("fixture-manifest.json", text)
-
-    def test_validation_workflow_enforces_auxiliary_fail_closed(self) -> None:
-        text = self._workflow_text()
-        self.assertEqual(2, text.count("Enforce auxiliary mode fail-closed"))
-        self.assertEqual(2, text.count("AUXILIARY_MODE_INPUT: ${{ inputs.auxiliary_mode }}"))
-        self.assertIn("is not enabled; the validation pipeline is fail-closed", text)
-
-    def test_validation_workflow_uploads_evidence_and_gates_on_classification(self) -> None:
-        text = self._workflow_text()
-        self.assertIn("name: mdx-repair-validation-offline-${{ github.run_id }}", text)
-        self.assertIn("name: mdx-repair-validation-real-codex-${{ github.run_id }}", text)
-        self.assertEqual(2, text.count("retention-days: 14"))
-        self.assertEqual(3, text.count("if: always()\n"))
-        self.assertIn("if: always() && steps.classify.outputs.classification != 'success'", text)
-        self.assertIn("mdx_repair_validation.py classify", text)
-        self.assertIn("steps.classify.outputs.classification != 'success'", text)
-
-    def test_validation_workflow_single_entry_audit_passes_on_current_workflow(self) -> None:
-        report = mdx_repair_validation.single_entry_report(
-            REPO_ROOT / ".github/workflows/mdx-repair-validation.yml"
-        )
-        self.assertTrue(report["passed"])
-        self.assertEqual(4, report["rounds_budget"])
-        self.assertEqual(4, report["action_count"])
-        self.assertEqual(4, report["prompt_count"])
-        self.assertEqual([], report["second_executor_tokens"])
-
-    def test_validation_workflow_single_entry_audit_rejects_second_executor(self) -> None:
-        workflow = REPO_ROOT / ".github/workflows/mdx-repair-validation.yml"
-        with tempfile.TemporaryDirectory() as tmp:
-            mutated = Path(tmp) / "mutated.yml"
-            mutated.write_text(
-                workflow.read_text(encoding="utf-8") + "      - run: codex exec --dangerously-bypass\n",
-                encoding="utf-8",
-            )
-            report = mdx_repair_validation.single_entry_report(mutated)
-            self.assertFalse(report["passed"])
-            self.assertIn("codex exec", report["second_executor_tokens"])
-
-            extra_round = Path(tmp) / "extra-round.yml"
-            extra_round.write_text(
-                workflow.read_text(encoding="utf-8").replace(
-                    'MDX_REPAIR_MAX_ATTEMPTS: "4"', 'MDX_REPAIR_MAX_ATTEMPTS: "5"'
-                ),
-                encoding="utf-8",
-            )
-            report = mdx_repair_validation.single_entry_report(extra_round)
-            self.assertFalse(report["passed"])
-            self.assertEqual(5, report["rounds_budget"])
-            self.assertEqual(4, report["action_count"])
-
-    def test_oracle_gate_expectations_come_from_frozen_fixture_manifest(self) -> None:
-        expectations = mdx_repair_validation.load_fixture_expectations()
-        self.assertEqual(2, len(expectations))
-        by_id = {str(entry["fixture_id"]): entry for entry in expectations}
-        html_comment = by_id["real-27629404260-zhcn-plugin-html-comment"]
-        taxonomy = by_id["real-27629404260-zhcn-taxonomy-stray-close"]
-        self.assertEqual("micromark-extension-mdx-jsx", html_comment["expected"]["source"])
-        self.assertEqual(29, html_comment["expected"]["line"])
-        self.assertEqual("mdast-util-mdx-jsx", taxonomy["expected"]["source"])
-        self.assertEqual(1075, taxonomy["expected"]["line"])
-        self.assertTrue(str(html_comment["file"]).startswith(str(REPO_ROOT)))
-
-    def test_oracle_expectation_match_requires_manifest_diagnostics_and_hash(self) -> None:
-        expectation = {
-            "expected": {"source": "mdast-util-mdx-jsx", "line": 1075, "column": 5, "offset": 114137},
-            "content_sha256": "hash-a",
-        }
-        failing = {
-            "outcome": "compile_failure",
-            "sha256": "hash-a",
-            "error": {"source": "mdast-util-mdx-jsx", "line": 1075, "column": 5, "offset": 114137},
-        }
-        self.assertTrue(mdx_repair_validation.oracle_expectation_matches(failing, expectation))
-        drifting_hash = {**failing, "sha256": "hash-b"}
-        self.assertFalse(mdx_repair_validation.oracle_expectation_matches(drifting_hash, expectation))
-        passing = {**failing, "outcome": "compile_success"}
-        self.assertFalse(mdx_repair_validation.oracle_expectation_matches(passing, expectation))
-        wrong_span = {
-            **failing,
-            "error": {"source": "mdast-util-mdx-jsx", "line": 900, "column": 5, "offset": 1},
-        }
-        self.assertFalse(mdx_repair_validation.oracle_expectation_matches(wrong_span, expectation))
-
-    def test_classify_verdict_covers_three_states(self) -> None:
-        base = {
-            "MDX_REPAIR_AUXILIARY_MODE": "none",
-            "MDX_VALIDATION_PREFLIGHT": "ok",
-            "MDX_VALIDATION_DECISION": "run",
-            "MDX_VALIDATION_FINAL_OUTCOME": "success",
-        }
-
-        def verdict_with(**overrides: str) -> tuple[str, str]:
-            with env({**base, **overrides}):  # type: ignore[arg-type]
-                return mdx_repair_validation.classify_verdict()
-
-        self.assertEqual(("success", "frozen_fixtures_pass_strict_recheck"), verdict_with())
-        self.assertEqual(("agent_failure", "relay_final_failure"), verdict_with(MDX_VALIDATION_FINAL_OUTCOME="final_failure"))
-        self.assertEqual(("agent_failure", "relay_partial_success"), verdict_with(MDX_VALIDATION_FINAL_OUTCOME="partial_success"))
-
-        classification, reason = verdict_with(
-            MDX_VALIDATION_PREFLIGHT="failed", MDX_VALIDATION_PREFLIGHT_CLASS="quota_exhausted"
-        )
-        self.assertEqual("environment_failure", classification)
-        self.assertEqual("preflight_failed_quota_exhausted", reason)
-        self.assertEqual(("environment_failure", "preflight_missing"), verdict_with(MDX_VALIDATION_PREFLIGHT="missing"))
-
-        classification, reason = verdict_with(
-            MDX_VALIDATION_DECISION="not_run",
-            MDX_VALIDATION_NOT_RUN_REASON="no_mdx_compile_diagnostics",
-            MDX_VALIDATION_FINAL_OUTCOME="unavailable",
-        )
-        self.assertEqual("environment_failure", classification)
-        self.assertEqual("relay_not_started_no_mdx_compile_diagnostics", reason)
-
-        classification, reason = verdict_with(MDX_VALIDATION_FINAL_OUTCOME="unavailable")
-        self.assertEqual("environment_failure", classification)
-        self.assertEqual("relay_outcome_unavailable", reason)
-
-        classification, reason = verdict_with(MDX_REPAIR_AUXILIARY_MODE="prettier")
-        self.assertEqual("environment_failure", classification)
-        self.assertEqual("auxiliary_mode_prettier_not_enabled", reason)
-
-    def test_classify_command_writes_report_evidence_and_outputs(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            mdx_dir = repo / ".openclaw-sync/mdx"
-            mdx_dir.mkdir(parents=True)
-            (mdx_dir / "zh-CN-round-1.json").write_text(
-                json.dumps(
-                    {
-                        "errors": [
-                            {
-                                "type": "mdx",
-                                "file": "docs/zh-CN/maturity/taxonomy.mdx",
-                                "line": 1063,
-                                "column": 5,
-                                "message": "Unexpected closing tag `</div>`",
-                            }
-                        ]
-                    }
-                ),
-                encoding="utf-8",
-            )
-            (mdx_dir / "zh-CN-repair-report.json").write_text(
-                json.dumps({"final_outcome": "final_failure", "rounds_history": [{"round": 1, "error_count": 1}]}),
-                encoding="utf-8",
-            )
-            output = repo / "github-output.txt"
-            evidence = repo / "evidence"
-            with chdir(repo), env(
-                {
-                    "GITHUB_WORKSPACE": str(repo),
-                    "GITHUB_OUTPUT": str(output),
-                    "MDX_REPAIR_AUXILIARY_MODE": "none",
-                    "MDX_VALIDATION_PREFLIGHT": "ok",
-                    "MDX_VALIDATION_DECISION": "run",
-                    "MDX_VALIDATION_FINAL_OUTCOME": "final_failure",
-                    "MDX_VALIDATION_FAILURE_KIND": "compile_failed",
-                    "MDX_VALIDATION_ROUNDS": "1",
-                    "MDX_VALIDATION_FAILED_PATHS": "docs/zh-CN/maturity/taxonomy.mdx",
-                }
-            ):
-                payload = mdx_repair_validation.classify_command(repo, "zh-CN", evidence)
-
-            self.assertEqual("agent_failure", payload["classification"])
-            report = json.loads((evidence / "classification.json").read_text(encoding="utf-8"))
-            self.assertEqual("agent_failure", report["classification"])
-            self.assertEqual("relay_final_failure", report["reason"])
-            self.assertEqual(["docs/zh-CN/maturity/taxonomy.mdx"], report["relay"]["failed_paths"])
-            self.assertEqual(1, report["relay"]["round_diagnostics"][0]["error_count"])
-            self.assertEqual("final_failure", report["relay"]["report"]["final_outcome"])
-            self.assertTrue((evidence / "relay/zh-CN-round-1.json").exists())
-            self.assertTrue((evidence / "relay/zh-CN-repair-report.json").exists())
-            self.assertIn("classification=agent_failure", output.read_text(encoding="utf-8"))
-            self.assertIn("reason=relay_final_failure", output.read_text(encoding="utf-8"))
-
-GHA_TOKEN_RE = re.compile(
-    r"steps\.[A-Za-z0-9_]+\.outcome"
-    r"|steps\.[A-Za-z0-9_]+\.outputs\.[A-Za-z0-9_]+"
-    r"|env\.[A-Z0-9_]+"
-    r"|inputs\.[a-z0-9_]+"
-    r"|needs\.[a-z0-9-]+\.result"
-)
-
-
-def _gha_format(fmt: str, args: tuple[str, ...]) -> str:
-    # Enough of GitHub's format() for the test expressions: {0}, {1}, ...
-    # escaped as {{ }}.
-    return re.sub(r"\{(\d)\}", lambda match: args[int(match.group(1))], fmt.replace("{{", "{").replace("}}", "}"))
-
-
-def evaluate_gha_condition(expression: str, values: dict[str, object]) -> bool:
-    """Evaluate a workflow `if:` expression for a fixed scenario (dry run)."""
-
-    def substitute(match: "re.Match[str]") -> str:
-        token = match.group(0)
-        if token not in values:
-            raise AssertionError(f"no scenario value for {token}")
-        return repr(values[token])
-
-    python = GHA_TOKEN_RE.sub(substitute, expression)
-    python = python.replace("&&", " and ").replace("||", " or ")
-    functions = {
-        "true": True,
-        "false": False,
-        "contains": lambda haystack, needle: needle in haystack,
-        "format": lambda fmt, *args: _gha_format(fmt, args),
-        "replace": lambda value, old, new: str(value).replace(old, new),
-        "always": lambda: True,
-    }
-    return bool(eval(python, {"__builtins__": {}}, functions))  # noqa: S307 - test-only expression evaluation
-
-
-class MdxRepairCanaryRolloutTests(unittest.TestCase):
-    """STORY-06: staged rollout wiring and the switch-off equivalence dry run."""
-
-    RELAY_STEP_NAMES = [
-        "Decide MDX repair relay",
-        "Snapshot translated MDX repair scope",
-        "Repair translated MDX",
-        "Enforce translated MDX repair scope",
-        "Recheck translated MDX",
-        "Repair translated MDX (relay round 2)",
-        "Enforce translated MDX repair scope (relay round 2)",
-        "Recheck translated MDX (relay round 2)",
-        "Repair translated MDX (relay round 3)",
-        "Enforce translated MDX repair scope (relay round 3)",
-        "Recheck translated MDX (relay round 3)",
-        "Repair translated MDX (relay round 4)",
-        "Enforce translated MDX repair scope (relay round 4)",
-        "Recheck translated MDX (relay round 4)",
-        "Record MDX repair relay outcome",
-    ]
-    CANARY_GUARD = " && env.MDX_REPAIR_CANARY_ENABLED == 'true'"
-
-    def _workflow_text(self) -> str:
-        return (REPO_ROOT / ".github/workflows/translate-locale-reusable.yml").read_text(encoding="utf-8")
-
-    def _job_text(self, text: str, job: str) -> str:
-        match = re.search(rf"(?ms)^  {re.escape(job)}:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", text)
-        self.assertIsNotNone(match)
-        assert match is not None
-        return match.group(0)
-
-    def _job_level_if(self, job_text: str, job: str) -> str:
-        match = re.search(rf"(?ms)^  {re.escape(job)}:\n.*?^    if: >-\n((?:      [^\n]+\n)+)", job_text)
-        self.assertIsNotNone(match, f"job {job} has no folded if")
-        assert match is not None
-        return " ".join(part.strip() for part in match.group(1).splitlines())
-
-    def _parse_steps(self, job_text: str) -> list[dict[str, str]]:
-        steps: list[dict[str, str]] = []
-        for match in re.finditer(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name: |\Z)", job_text):
-            block = match.group(2)
-            id_match = re.search(r"^        id: ([A-Za-z0-9_]+)$", block, re.M)
-            condition = ""
-            cond_match = re.search(
-                r"(?ms)^        if: >-\n((?:          [^\n]+\n)+)|^        if: ([^\n]+)$", block
-            )
-            if cond_match:
-                folded, single = cond_match.group(1), cond_match.group(2)
-                condition = " ".join(part.strip() for part in folded.splitlines()) if folded else single.strip()
-            steps.append(
-                {
-                    "name": match.group(1).strip(),
-                    "id": id_match.group(1) if id_match else "",
-                    "if": condition,
-                }
-            )
-        return steps
-
-    def _pre_canary_steps(self, steps: list[dict[str, str]]) -> list[dict[str, str]]:
-        """Model the workflow before the canary/relay chain: relay steps gone,
-        guard tokens stripped from every remaining condition."""
-        pre: list[dict[str, str]] = []
-        for step in steps:
-            if step["name"] in self.RELAY_STEP_NAMES:
-                continue
-            pre.append({**step, "if": step["if"].replace(self.CANARY_GUARD, "")})
-        return pre
-
-    def _run_plan(
-        self,
-        steps: list[dict[str, str]],
-        static: dict[str, object],
-        world_outcomes: dict[str, str],
-        world_outputs: dict[str, dict[str, str]],
-        start: str,
-    ) -> list[str]:
-        ids = sorted({step["id"] for step in steps if step["id"]})
-        output_keys = sorted({key for outputs in world_outputs.values() for key in outputs})
-        outcomes: dict[str, str] = {}
-        outputs: dict[str, dict[str, str]] = {}
-        executed: list[str] = []
-        started = False
-        for step in steps:
-            if step["name"] == start:
-                started = True
-            if not started:
-                continue
-            values: dict[str, object] = dict(static)
-            for step_id in ids:
-                values.setdefault(f"steps.{step_id}.outcome", "skipped")
-            for step_id, outcome in outcomes.items():
-                values[f"steps.{step_id}.outcome"] = outcome
-            for step_id in ids:
-                for key in output_keys:
-                    values.setdefault(f"steps.{step_id}.outputs.{key}", "")
-            for step_id, step_outputs in outputs.items():
-                for key, value in step_outputs.items():
-                    values[f"steps.{step_id}.outputs.{key}"] = value
-            ran = evaluate_gha_condition(step["if"], values) if step["if"] else True
-            if ran:
-                executed.append(step["name"])
-                if step["id"]:
-                    outcomes[step["id"]] = world_outcomes.get(step["id"], "success")
-                    outputs[step["id"]] = world_outputs.get(step["id"], {})
-            elif step["id"]:
-                outcomes[step["id"]] = "skipped"
-        return executed
-
-    def _translate_static(self, canary_enabled: bool, gate_result: str) -> dict[str, object]:
-        return {
-            "steps.stale.outputs.skip": "false",
-            "steps.pending.outputs.pending_count": "1",
-            "steps.translate_docs.outcome": "success",
-            "env.MDX_REPAIR_MAX_ATTEMPTS": 4,
-            "env.MDX_REPAIR_CANARY_ENABLED": "true" if canary_enabled else "false",
-            "inputs.canary_gate_failure_policy": "fallback",
-            "needs.mdx-repair-gate.result": gate_result,
-        }
-
-    def test_canary_switch_inputs_default_to_original_failure_path(self) -> None:
-        import yaml  # Preinstalled on GitHub runners; only used to mirror the dispatch/call input blocks.
-
-        workflow = yaml.safe_load(self._workflow_text())
-        triggers = workflow[True] if True in workflow else workflow["on"]
-        self.assertEqual(["workflow_call", "workflow_dispatch"], sorted(triggers))
-        call = triggers["workflow_call"]["inputs"]
-        dispatch = triggers["workflow_dispatch"]["inputs"]
-        self.assertEqual(sorted(call), sorted(dispatch))
-        for name, spec in call.items():
-            self.assertEqual(spec.get("default"), dispatch[name].get("default"), name)
-            self.assertEqual(spec.get("type"), dispatch[name].get("type"), name)
-        self.assertEqual(False, call["mdx_repair_enabled"]["default"])
-        self.assertEqual("", call["canary_locales"]["default"])
-        self.assertEqual("", call["canary_paths"]["default"])
-        self.assertEqual("fallback", call["canary_gate_failure_policy"]["default"])
-        self.assertEqual("boolean", call["mdx_repair_enabled"]["type"])
-
-    def test_switch_off_dry_run_matches_pre_canary_failure_path(self) -> None:
-        text = self._workflow_text()
-        translate_steps = self._parse_steps(self._job_text(text, "translate"))
-        current = [step for step in translate_steps if step["name"] != "Decide canary MDX repair scope"]
-        pre_canary = self._pre_canary_steps(current)
-
-        world_outcomes = {
-            "mdx_check": "failure",
-            "mdx_canary": "success",
-            "mdx_relay": "success",
-            "mdx_repair": "success",
-            "mdx_scope": "success",
-            "mdx_recheck": "success",
-            "package": "success",
-        }
-        world_outputs = {
-            "mdx_relay": {"decision": "run", "reason": ""},
-            "mdx_repair_report": {"final_outcome": "success", "failed_paths": ""},
-            "package": {"failed": "true", "failed_reason": "mdx repair failed"},
-        }
-        start = "Install docs MDX checker dependency"
-        for canary_enabled, gate_result in ((False, "skipped"), (False, "failure")):
-            executed = self._run_plan(
-                current,
-                self._translate_static(canary_enabled, gate_result),
-                world_outcomes,
-                world_outputs,
-                start,
-            )
-            baseline = self._run_plan(
-                pre_canary,
-                self._translate_static(canary_enabled, gate_result),
-                world_outcomes,
-                world_outputs,
-                start,
-            )
-            self.assertEqual(baseline, executed)
-            self.assertNotIn("Decide canary MDX repair scope", executed)
-            for relay_step in self.RELAY_STEP_NAMES:
-                self.assertNotIn(relay_step, executed)
-            self.assertEqual(
-                [
-                    "Install docs MDX checker dependency",
-                    "Check translated MDX",
-                    "Prepare locale artifact",
-                    "Upload locale artifact",
-                    "Fail failed locale artifact",
-                ],
-                executed,
-            )
-
-    def test_canary_enabled_dry_run_runs_bounded_relay(self) -> None:
-        text = self._workflow_text()
-        translate_steps = self._parse_steps(self._job_text(text, "translate"))
-        current = [step for step in translate_steps if step["name"] != "Decide canary MDX repair scope"]
-        world_outcomes = {
-            "mdx_check": "failure",
-            "mdx_relay": "success",
-            "mdx_repair": "success",
-            "mdx_scope": "success",
-            "mdx_recheck": "success",
-            "package": "success",
-        }
-        world_outputs = {
-            "mdx_relay": {"decision": "run", "reason": ""},
-            "mdx_repair_report": {"final_outcome": "success", "failed_paths": ""},
-            "package": {"failed": "false", "failed_reason": ""},
-        }
-        executed = self._run_plan(
-            current,
-            self._translate_static(True, "success"),
-            world_outcomes,
-            world_outputs,
-            "Install docs MDX checker dependency",
-        )
-        self.assertEqual(
-            [
-                "Install docs MDX checker dependency",
-                "Check translated MDX",
-                "Decide MDX repair relay",
-                "Snapshot translated MDX repair scope",
-                "Repair translated MDX",
-                "Enforce translated MDX repair scope",
-                "Recheck translated MDX",
-                "Record MDX repair relay outcome",
-                "Prepare locale artifact",
-                "Upload locale artifact",
-            ],
-            executed,
-        )
-        # A passing first-round recheck keeps rounds 2..4 skipped, and the
-        # failed-artifact step does not run because the relay rescued the
-        # shard inside its gates.
-        self.assertNotIn("Fail failed locale artifact", executed)
-        self.assertNotIn("Repair translated MDX (relay round 2)", executed)
-
-    def test_translate_job_waits_for_gate_and_keeps_default_path(self) -> None:
-        translate_job = self._job_text(self._workflow_text(), "translate")
-        self.assertIn("needs: mdx-repair-gate", translate_job)
-        translate_if = self._job_level_if(translate_job, "translate")
-        base = {"inputs.canary_gate_failure_policy": "fallback"}
-        self.assertTrue(evaluate_gha_condition(translate_if, {**base, "needs.mdx-repair-gate.result": "skipped"}))
-        self.assertTrue(evaluate_gha_condition(translate_if, {**base, "needs.mdx-repair-gate.result": "success"}))
-        self.assertTrue(evaluate_gha_condition(translate_if, {**base, "needs.mdx-repair-gate.result": "failure"}))
-        self.assertFalse(
-            evaluate_gha_condition(
-                translate_if,
-                {
-                    "inputs.canary_gate_failure_policy": "abort",
-                    "needs.mdx-repair-gate.result": "failure",
-                },
-            )
-        )
-        self.assertFalse(
-            evaluate_gha_condition(translate_if, {**base, "needs.mdx-repair-gate.result": "cancelled"})
-        )
-
-        decide = next(
-            step for step in self._parse_steps(translate_job) if step["name"] == "Decide canary MDX repair scope"
-        )
-        self.assertEqual("mdx_canary", decide["id"])
-        self.assertIn('python "${I18N_SCRIPT_DIR}/mdx_repair_canary.py" decide', translate_job)
-        self.assertIn("MDX_REPAIR_GATE_RESULT: ${{ needs.mdx-repair-gate.result }}", translate_job)
-        self.assertIn("MDX_REPAIR_ENABLED_INPUT: ${{ inputs.mdx_repair_enabled }}", translate_job)
-        self.assertIn("CANARY_LOCALES: ${{ inputs.canary_locales }}", translate_job)
-        self.assertIn("CANARY_PATHS: ${{ inputs.canary_paths }}", translate_job)
-        # The decision step runs before translation so the guard variable is
-        # available to every relay step condition.
-        self.assertLess(
-            translate_job.index("Decide canary MDX repair scope"),
-            translate_job.index("Translate changed docs into locale"),
-        )
-
-    def test_gate_job_reuses_validation_subpipeline_fail_closed(self) -> None:
-        gate_job = self._job_text(self._workflow_text(), "mdx-repair-gate")
-        self.assertIn("uses: ./.github/workflows/mdx-repair-validation.yml", gate_job)
-        self.assertIn("real_codex: true", gate_job)
-        self.assertIn("secrets: inherit", gate_job)
-        self.assertRegex(gate_job, r"(?ms)^    permissions:\n      contents: read\n")
-        self.assertNotIn("timeout-minutes", gate_job)
-        self.assertNotIn("codex exec", gate_job)
-        gate_if = self._job_level_if(gate_job, "mdx-repair-gate")
-        self.assertIn("inputs.mdx_repair_enabled == true", gate_if)
-        # Exact token membership, not substring matching: zh-CN2 must not
-        # enable zh-CN. canary_locales is a comma-separated list without
-        # spaces so the expression-only gate check stays exact.
-        self.assertIn(
-            "contains(format(',{0},', inputs.canary_locales), format(',{0},', inputs.locale))",
-            gate_if,
-        )
-        self.assertTrue(
-            evaluate_gha_condition(
-                gate_if,
-                {
-                    "inputs.mdx_repair_enabled": True,
-                    "inputs.canary_locales": "zh-CN,ja-JP",
-                    "inputs.locale": "zh-CN",
-                },
-            )
-        )
-        self.assertFalse(
-            evaluate_gha_condition(
-                gate_if,
-                {
-                    "inputs.mdx_repair_enabled": True,
-                    "inputs.canary_locales": "zh-CN2,ja-JP",
-                    "inputs.locale": "zh-CN",
-                },
-            )
-        )
-        self.assertFalse(
-            evaluate_gha_condition(
-                gate_if,
-                {
-                    "inputs.mdx_repair_enabled": False,
-                    "inputs.canary_locales": "zh-CN",
-                    "inputs.locale": "zh-CN",
-                },
-            )
-        )
-
-    def test_finalize_consumes_gate_before_publish_and_stays_default_when_off(self) -> None:
-        text = self._workflow_text()
-        commit_job = self._job_text(text, "commit-locale")
-        commit_if = self._job_level_if(commit_job, "commit-locale")
-        original_if = (
-            "needs.translate.result == 'success' && "
-            "(inputs.commit_locale || (inputs.artifact_role == 'canary' && inputs.canary_publish_required))"
-        )
-        combos = [
-            {"inputs.commit_locale": False, "inputs.artifact_role": "locale", "inputs.canary_publish_required": False},
-            {"inputs.commit_locale": True, "inputs.artifact_role": "locale", "inputs.canary_publish_required": False},
-            {"inputs.commit_locale": False, "inputs.artifact_role": "canary", "inputs.canary_publish_required": True},
-            {"inputs.commit_locale": False, "inputs.artifact_role": "canary", "inputs.canary_publish_required": False},
-        ]
-        for combo in combos:
-            combo = {**combo, "needs.translate.result": "success"}
-            skipped_gate = {
-                **combo,
-                "needs.translate.result": "success",
-                "needs.mdx-repair-gate.result": "skipped",
-                "inputs.canary_gate_failure_policy": "fallback",
-            }
-            # Switch off: the new finalize condition must accept exactly the
-            # same publishes as the pre-canary condition.
-            self.assertEqual(
-                evaluate_gha_condition(original_if, combo),
-                evaluate_gha_condition(commit_if, skipped_gate),
-                combo,
-            )
-            aborted_gate = {
-                **combo,
-                "needs.translate.result": "success",
-                "needs.mdx-repair-gate.result": "failure",
-                "inputs.canary_gate_failure_policy": "abort",
-            }
-            self.assertFalse(evaluate_gha_condition(commit_if, aborted_gate))
-        fallback_gate = {
-            "inputs.commit_locale": True,
-            "inputs.artifact_role": "locale",
-            "inputs.canary_publish_required": False,
-            "needs.translate.result": "success",
-            "needs.mdx-repair-gate.result": "failure",
-            "inputs.canary_gate_failure_policy": "fallback",
-        }
-        self.assertTrue(evaluate_gha_condition(commit_if, fallback_gate))
-        self.assertFalse(
-            evaluate_gha_condition(commit_if, {**fallback_gate, "needs.translate.result": "failure"})
-        )
-
-        self.assertIn("needs:\n      - translate\n      - mdx-repair-gate", commit_job)
-        # Gate consumption happens before commit/dispatch, so abort fails
-        # before anything is published.
-        self.assertLess(
-            commit_job.index("Consume MDX repair release gate"), commit_job.index("Commit locale refresh")
-        )
-        self.assertLess(
-            commit_job.index("Consume MDX repair release gate"), commit_job.index("Dispatch locale docs deploy")
-        )
-        self.assertIn("name: mdx-repair-validation-real-codex-${{ github.run_id }}", commit_job)
-        self.assertIn('python "${I18N_SCRIPT_DIR}/mdx_repair_canary.py" gate', commit_job)
-        self.assertIn("MDX_REPAIR_GATE_RESULT: ${{ needs.mdx-repair-gate.result }}", commit_job)
-
-        # Switch off: none of the new finalize steps run.
-        static = {
-            "inputs.commit_locale": True,
-            "inputs.artifact_role": "locale",
-            "inputs.canary_publish_required": False,
-            "inputs.mdx_repair_enabled": False,
-            "inputs.canary_gate_failure_policy": "fallback",
-            "needs.translate.result": "success",
-            "needs.mdx-repair-gate.result": "skipped",
-        }
-        world_outputs = {
-            "apply": {"changed_count": "1", "incomplete_count": "0"},
-            "locale_commit": {"committed": "true"},
-        }
-        executed = self._run_plan(
-            self._parse_steps(commit_job),
-            static,
-            {"apply": "success", "locale_commit": "success"},
-            world_outputs,
-            "Apply locale artifact",
-        )
-        for new_step in (
-            "Download MDX repair validation evidence",
-            "Consume MDX repair release gate",
-            "Verify canary R2 content against artifact",
-            "Record canary release summary",
-            "Upload canary release summary evidence",
-        ):
-            self.assertNotIn(new_step, executed)
-        self.assertIn("Commit locale refresh", executed)
-        self.assertIn("Dispatch locale docs deploy", executed)
-
-    def test_canary_finalize_steps_run_only_for_enabled_canary(self) -> None:
-        commit_job = self._job_text(self._workflow_text(), "commit-locale")
-        static = {
-            "inputs.commit_locale": False,
-            "inputs.artifact_role": "canary",
-            "inputs.canary_publish_required": True,
-            "inputs.mdx_repair_enabled": True,
-            "inputs.canary_gate_failure_policy": "fallback",
-            "needs.translate.result": "success",
-            "needs.mdx-repair-gate.result": "success",
-            "steps.locale_commit.outputs.committed": "",
-        }
-        world_outputs = {"apply": {"changed_count": "1", "incomplete_count": "0"}}
-        executed = self._run_plan(
-            self._parse_steps(commit_job),
-            static,
-            {
-                "apply": "success",
-                "mdx_release_gate": "success",
-                "r2_smoke": "success",
-                "release_summary": "success",
-            },
-            world_outputs,
-            "Check out latest main",
-        )
-        for new_step in (
-            "Download MDX repair validation evidence",
-            "Consume MDX repair release gate",
-            "Verify canary R2 content against artifact",
-            "Record canary release summary",
-            "Upload canary release summary evidence",
-        ):
-            self.assertIn(new_step, executed)
-        self.assertIn("Dispatch locale docs deploy", executed)
-        self.assertIn('python "${I18N_SCRIPT_DIR}/mdx_repair_canary.py" r2-smoke', commit_job)
-        self.assertIn('python "${I18N_SCRIPT_DIR}/mdx_repair_canary.py" summary', commit_job)
-        self.assertIn("canary-release-summary-${{ inputs.locale_slug }}", commit_job)
-        self.assertIn("retention-days: 14", commit_job)
-
-    def test_every_relay_step_condition_carries_canary_guard(self) -> None:
-        translate_job = self._job_text(self._workflow_text(), "translate")
-        by_name = {step["name"]: step for step in self._parse_steps(translate_job)}
-        for relay_step in self.RELAY_STEP_NAMES:
-            self.assertIn(self.CANARY_GUARD, by_name[relay_step]["if"], relay_step)
-        guarded = [step for step in self._parse_steps(translate_job) if self.CANARY_GUARD in step["if"]]
-        self.assertEqual(
-            sorted(self.RELAY_STEP_NAMES),
-            sorted(step["name"] for step in guarded),
-        )
-        # The strict check and packaging belong to the original path and are
-        # never gated by the canary.
-        self.assertNotIn(self.CANARY_GUARD, by_name["Check translated MDX"]["if"])
-        self.assertNotIn(self.CANARY_GUARD, by_name["Prepare locale artifact"]["if"])
-
-
-class MdxRepairCanaryTests(unittest.TestCase):
-    """STORY-06: canary switch, RELEASE gate, release summary, and R2 smoke."""
-
-    def _decide(
-        self, repo: Path, manifest_pages: list[str] | None = None, **overrides: str
-    ) -> tuple[dict[str, object], str, str]:
-        output = repo / "github-output.txt"
-        env_file = repo / "github-env.txt"
-        values = {
-            "LOCALE": "zh-CN",
-            "LOCALE_SLUG": "zh-CN",
-            "SHARD_INDEX": "0",
-            "SHARD_TOTAL": "1",
-            "MDX_REPAIR_ENABLED_INPUT": "false",
-            "CANARY_LOCALES": "",
-            "CANARY_PATHS": "",
-            "CANARY_GATE_FAILURE_POLICY": "fallback",
-            "MDX_REPAIR_GATE_RESULT": "skipped",
-            "GITHUB_OUTPUT": str(output),
-            "GITHUB_ENV": str(env_file),
-        }
-        values.update(overrides)
-        if manifest_pages is not None:
-            manifest = repo / ".openclaw-sync/docs-i18n-zh-CN-s0of1.txt"
-            manifest.parent.mkdir(parents=True, exist_ok=True)
-            manifest.write_text("".join(f"{repo / page}\n" for page in manifest_pages), encoding="utf-8")
-        with chdir(repo), env(values):  # type: ignore[arg-type]
-            mdx_repair_canary.decide_command(repo)
-        decision = json.loads(
-            (repo / ".openclaw-sync/mdx/zh-CN-canary-decision.json").read_text(encoding="utf-8")
-        )
-        return decision, output.read_text(encoding="utf-8"), env_file.read_text(encoding="utf-8")
-
-    def test_decide_switch_off_records_original_failure_path(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            decision, output, env_file = self._decide(repo, MDX_REPAIR_ENABLED_INPUT="false")
-            self.assertFalse(decision["enabled"])
-            self.assertEqual("switch_off", decision["reason"])
-            self.assertIn("enabled=false", output)
-            self.assertIn(f"{mdx_repair_canary.CANARY_ENV_VAR}=false", env_file)
-
-    def test_decide_requires_filled_whitelists(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            pages = ["docs/channels/line.md"]
-            decision, _, _ = self._decide(
-                repo, manifest_pages=pages, MDX_REPAIR_ENABLED_INPUT="true", CANARY_LOCALES=""
-            )
-            self.assertEqual("canary_locales_empty", decision["reason"])
-
-            decision, _, _ = self._decide(
-                repo,
-                manifest_pages=pages,
-                MDX_REPAIR_ENABLED_INPUT="true",
-                CANARY_LOCALES="ja-JP",
-                CANARY_PATHS="channels",
-            )
-            self.assertEqual("locale_not_in_canary_scope", decision["reason"])
-
-            decision, _, _ = self._decide(
-                repo,
-                manifest_pages=pages,
-                MDX_REPAIR_ENABLED_INPUT="true",
-                CANARY_LOCALES="zh-CN",
-                CANARY_PATHS="",
-            )
-            self.assertEqual("canary_paths_empty", decision["reason"])
-
-    def test_decide_locale_membership_is_exact_token(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            pages = ["docs/channels/line.md"]
-            # Substring traps (zh-CN inside zh-CN2) must not enable the canary.
-            decision, _, _ = self._decide(
-                repo,
-                manifest_pages=pages,
-                MDX_REPAIR_ENABLED_INPUT="true",
-                CANARY_LOCALES="zh-CN2",
-                CANARY_PATHS="channels",
-                MDX_REPAIR_GATE_RESULT="success",
-            )
-            self.assertEqual("locale_not_in_canary_scope", decision["reason"])
-
-            decision, output, env_file = self._decide(
-                repo,
-                manifest_pages=pages,
-                MDX_REPAIR_ENABLED_INPUT="true",
-                CANARY_LOCALES="zh-CN, ja-JP",
-                CANARY_PATHS="channels",
-                MDX_REPAIR_GATE_RESULT="success",
-            )
-            self.assertTrue(decision["enabled"])
-            self.assertEqual("canary_enabled", decision["reason"])
-            self.assertIn("enabled=true", output)
-            self.assertIn(f"{mdx_repair_canary.CANARY_ENV_VAR}=true", env_file)
-
-    def test_decide_rejects_pending_pages_outside_canary_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            decision, _, _ = self._decide(
-                repo,
-                manifest_pages=["docs/channels/line.md", "docs/guide/other.md"],
-                MDX_REPAIR_ENABLED_INPUT="true",
-                CANARY_LOCALES="zh-CN",
-                CANARY_PATHS="channels",
-                MDX_REPAIR_GATE_RESULT="success",
-            )
-            self.assertFalse(decision["enabled"])
-            self.assertTrue(str(decision["reason"]).startswith("pending_paths_outside_canary_scope"))
-            self.assertIn("docs/zh-CN/guide/other.md", decision["pending_pages_outside_canary_scope"])
-
-            # Directory prefixes and exact file paths both stay inside scope.
-            decision, _, _ = self._decide(
-                repo,
-                manifest_pages=["docs/channels/line.md", "docs/channels/sub/page.md"],
-                MDX_REPAIR_ENABLED_INPUT="true",
-                CANARY_LOCALES="zh-CN",
-                CANARY_PATHS="channels channels/line.md",
-                MDX_REPAIR_GATE_RESULT="success",
-            )
-            self.assertTrue(decision["enabled"])
-
-    def test_decide_requires_validation_gate_success(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            base = {
-                "manifest_pages": ["docs/channels/line.md"],
-                "MDX_REPAIR_ENABLED_INPUT": "true",
-                "CANARY_LOCALES": "zh-CN",
-                "CANARY_PATHS": "channels/line.md",
-            }
-            decision, _, env_file = self._decide(repo, **base, MDX_REPAIR_GATE_RESULT="success")
-            self.assertTrue(decision["enabled"])
-            self.assertIn(f"{mdx_repair_canary.CANARY_ENV_VAR}=true", env_file)
-
-            decision, _, _ = self._decide(repo, **base, MDX_REPAIR_GATE_RESULT="failure")
-            self.assertFalse(decision["enabled"])
-            self.assertEqual("validation_gate_failure", decision["reason"])
-
-            decision, _, _ = self._decide(repo, **base, MDX_REPAIR_GATE_RESULT="cancelled")
-            self.assertFalse(decision["enabled"])
-            self.assertEqual("validation_gate_cancelled", decision["reason"])
-
-    def test_decide_invalid_policy_fails_closed_only_when_switch_on(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            decision, _, _ = self._decide(repo, CANARY_GATE_FAILURE_POLICY="yolo")
-            self.assertEqual("switch_off", decision["reason"])
-
-            with self.assertRaisesRegex(SystemExit, "CANARY_GATE_FAILURE_POLICY"):
-                self._decide(
-                    repo,
-                    manifest_pages=["docs/channels/line.md"],
-                    MDX_REPAIR_ENABLED_INPUT="true",
-                    CANARY_LOCALES="zh-CN",
-                    CANARY_PATHS="channels",
-                    CANARY_GATE_FAILURE_POLICY="yolo",
-                )
-
-    def _gate(self, repo: Path, evidence: dict[str, object] | None, **overrides: str) -> tuple[dict[str, object], str]:
-        output = repo / "github-output.txt"
-        evidence_dir = repo / ".openclaw-sync/mdx-repair-gate"
-        evidence_dir.mkdir(parents=True, exist_ok=True)
-        classification = evidence_dir / "classification.json"
-        if evidence is not None:
-            classification.write_text(json.dumps(evidence), encoding="utf-8")
-        else:
-            classification.unlink(missing_ok=True)
-        values = {
-            "MDX_REPAIR_GATE_RESULT": "success",
-            "CANARY_GATE_FAILURE_POLICY": "fallback",
-            "GITHUB_OUTPUT": str(output),
-        }
-        values.update(overrides)
-        with chdir(repo), env(values):  # type: ignore[arg-type]
-            mdx_repair_canary.gate_command(evidence_dir)
-        record = json.loads((evidence_dir / "gate-decision.json").read_text(encoding="utf-8"))
-        return record, output.read_text(encoding="utf-8")
-
-    def test_gate_passes_only_with_success_classification(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            record, output = self._gate(
-                repo, {"classification": "success", "reason": "frozen_fixtures_pass_strict_recheck"}
-            )
-            self.assertEqual("pass", record["gate_decision"])
-            self.assertEqual("success", record["classification"])
-            self.assertIn("gate_decision=pass", output)
-
-            with self.assertRaisesRegex(SystemExit, "classification evidence is missing"):
-                self._gate(repo, None)
-
-            with self.assertRaisesRegex(SystemExit, "classification evidence says agent_failure"):
-                self._gate(repo, {"classification": "agent_failure", "reason": "relay_final_failure"})
-
-    def test_gate_fallback_records_and_continues(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            record, output = self._gate(
-                repo,
-                {"classification": "agent_failure", "reason": "relay_final_failure"},
-                MDX_REPAIR_GATE_RESULT="failure",
-                CANARY_GATE_FAILURE_POLICY="fallback",
-            )
-            self.assertEqual("fallback", record["gate_decision"])
-            self.assertEqual("agent_failure", record["classification"])
-            self.assertIn("gate_decision=fallback", output)
-            self.assertIn("classification=agent_failure", output)
-
-            record, _ = self._gate(
-                repo,
-                {"classification": "environment_failure", "reason": "preflight_failed_quota_exhausted"},
-                MDX_REPAIR_GATE_RESULT="failure",
-                CANARY_GATE_FAILURE_POLICY="fallback",
-            )
-            self.assertEqual("environment_failure", record["classification"])
-
-            # A failed gate without evidence still records the decision.
-            record, _ = self._gate(repo, None, MDX_REPAIR_GATE_RESULT="failure")
-            self.assertEqual("fallback", record["gate_decision"])
-            self.assertEqual("unknown", record["classification"])
-            self.assertEqual("classification_evidence_missing", record["reason"])
-
-            # Evidence contradicting the failed gate result fails closed.
-            with self.assertRaisesRegex(SystemExit, "classification evidence says success"):
-                self._gate(repo, {"classification": "success"}, MDX_REPAIR_GATE_RESULT="failure")
-
-    def test_gate_abort_records_before_failing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            output = repo / "github-output.txt"
-            evidence_dir = repo / ".openclaw-sync/mdx-repair-gate"
-            evidence_dir.mkdir(parents=True)
-            (evidence_dir / "classification.json").write_text(
-                json.dumps({"classification": "environment_failure", "reason": "preflight_failed_quota"}),
-                encoding="utf-8",
-            )
-            with chdir(repo), env(
-                {
-                    "MDX_REPAIR_GATE_RESULT": "failure",
-                    "CANARY_GATE_FAILURE_POLICY": "abort",
-                    "GITHUB_OUTPUT": str(output),
-                }
-            ):
-                with self.assertRaisesRegex(SystemExit, "canary aborted"):
-                    mdx_repair_canary.gate_command(evidence_dir)
-            record = json.loads((evidence_dir / "gate-decision.json").read_text(encoding="utf-8"))
-            self.assertEqual("abort", record["gate_decision"])
-            self.assertIn("gate_decision=abort", output.read_text(encoding="utf-8"))
-
-    def test_gate_skipped_when_canary_off(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            record, output = self._gate(repo, None, MDX_REPAIR_GATE_RESULT="skipped")
-            self.assertEqual("not_applicable", record["gate_decision"])
-            self.assertIn("gate_decision=not_applicable", output)
-
-    def _summary(self, repo: Path, artifact: dict[str, object], **overrides: str) -> tuple[dict[str, object], str]:
-        artifact_dir = repo / ".openclaw-sync/i18n-artifacts/zh-CN-s0of1"
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        (artifact_dir / "metadata.json").write_text(json.dumps(artifact), encoding="utf-8")
-        summary_file = repo / "step-summary.md"
-        values = {
-            "LOCALE": "zh-CN",
-            "LOCALE_SLUG": "zh-CN",
-            "SHARD_INDEX": "0",
-            "SHARD_TOTAL": "1",
-            "ARTIFACT_ROLE": "canary",
-            "GATE_DECISION": "pass",
-            "GATE_CLASSIFICATION": "success",
-            "GATE_REASON": "validation_classification_success",
-            "CANARY_GATE_FAILURE_POLICY": "fallback",
-            "R2_SMOKE_OUTCOME": "verified",
-            "R2_SMOKE_REASON": "live_h1_matches_artifact",
-            "R2_SMOKE_EXPECTED_H1": "LINE",
-            "PAGES_DISPATCH_WAITED": "true",
-            "GITHUB_STEP_SUMMARY": str(summary_file),
-        }
-        values.update(overrides)
-        with chdir(repo), env(values):  # type: ignore[arg-type]
-            mdx_repair_canary.summary_command(artifact_dir, repo)
-        record = json.loads(
-            (repo / ".openclaw-sync/canary-release-summary-zh-CN-s0of1.json").read_text(encoding="utf-8")
-        )
-        return record, summary_file.read_text(encoding="utf-8")
-
-    def test_summary_lists_ac03_sections_and_clean_integrity(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            artifact = {
-                "mdx_repair_mode": "relay",
-                "mdx_repair_rounds": 2,
-                "mdx_repair_final_outcome": "success",
-                "mdx_repair_changed_paths": ["docs/zh-CN/channels/line.md"],
-                "mdx_repair_failed_paths": [],
-                "failed_reason": "",
-            }
-            report = {
-                "repair_mode": "relay",
-                "rounds": 2,
-                "final_outcome": "success",
-                "failure_kind": "none",
-                "changed_paths": [{"path": "docs/zh-CN/channels/line.md"}],
-                "failed_paths": [],
-                "violations": [],
-            }
-            (repo / ".openclaw-sync/i18n-artifacts/zh-CN-s0of1").mkdir(parents=True)
-            (repo / ".openclaw-sync/i18n-artifacts/zh-CN-s0of1/mdx-repair-report.json").write_text(
-                json.dumps(report), encoding="utf-8"
-            )
-            record, markdown = self._summary(repo, artifact)
-            self.assertEqual("relay", record["repair"]["repair_mode"])
-            self.assertEqual(2, record["repair"]["rounds"])
-            self.assertEqual(["docs/zh-CN/channels/line.md"], record["repair"]["repaired_pages"])
-            self.assertEqual([], record["repair"]["checker_intercepted_pages"])
-            self.assertEqual([], record["repair"]["failed_pages"])
-            self.assertEqual([], record["remaining_risks"])
-            self.assertEqual("verified", record["publish_integrity"]["r2_content"]["outcome"])
-            for fragment in (
-                "release gate: `pass`",
-                "Codex repaired pages: `docs/zh-CN/channels/line.md`",
-                "checker intercepted pages: none",
-                "failed pages: none",
-                "remaining risks: none recorded",
-                "R2 content=`verified`",
-            ):
-                self.assertIn(fragment, markdown)
-
-    def test_summary_reports_failed_checker_intercepted_and_risk_tokens(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            artifact = {
-                "mdx_repair_mode": "relay",
-                "mdx_repair_rounds": 4,
-                "mdx_repair_final_outcome": "final_failure",
-                "mdx_repair_changed_paths": [],
-                "mdx_repair_failed_paths": ["docs/zh-CN/maturity/taxonomy.md"],
-                "failed_reason": "mdx repair failed",
-            }
-            report = {
-                "repair_mode": "relay",
-                "rounds": 4,
-                "final_outcome": "final_failure",
-                "failure_kind": "content_loss",
-                "changed_paths": [],
-                "failed_paths": [{"path": "docs/zh-CN/maturity/taxonomy.md"}],
-                "violations": [
-                    {"gate": "checker", "code": "whole_document_deleted", "path": "docs/zh-CN/maturity/taxonomy.md"}
-                ],
-            }
-            (repo / ".openclaw-sync/i18n-artifacts/zh-CN-s0of1").mkdir(parents=True)
-            (repo / ".openclaw-sync/i18n-artifacts/zh-CN-s0of1/mdx-repair-report.json").write_text(
-                json.dumps(report), encoding="utf-8"
-            )
-            record, markdown = self._summary(
-                repo,
-                artifact,
-                GATE_DECISION="fallback",
-                GATE_CLASSIFICATION="agent_failure",
-                GATE_REASON="relay_final_failure",
-                R2_SMOKE_OUTCOME="",
-                R2_SMOKE_REASON="dispatch_no_wait_final_publication_covered_by_locale_full_deploys",
-                PAGES_DISPATCH_WAITED="false",
-            )
-            self.assertEqual(
-                ["docs/zh-CN/maturity/taxonomy.md"], record["repair"]["checker_intercepted_pages"]
-            )
-            self.assertEqual(["docs/zh-CN/maturity/taxonomy.md"], record["repair"]["failed_pages"])
-            self.assertEqual(
-                [
-                    "pages_still_failing_1",
-                    "checker_intercepted_1",
-                    "relay_final_failure",
-                    "release_gate_fallback_agent_failure",
-                    "r2_content_unverified_dispatch_no_wait_final_publication_covered_by_locale_full_deploys",
-                    "pages_dispatch_not_waited",
-                ],
-                record["remaining_risks"],
-            )
-            self.assertIn("R2 content=`unverified`", markdown)
-            self.assertIn("- remaining risks:", markdown)
-
-    def test_summary_marks_missing_metadata_as_risk(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            artifact_dir = repo / ".openclaw-sync/i18n-artifacts/zh-CN-s0of1"
-            artifact_dir.mkdir(parents=True)
-            summary_file = repo / "step-summary.md"
-            with chdir(repo), env(
-                {
-                    "LOCALE": "zh-CN",
-                    "LOCALE_SLUG": "zh-CN",
-                    "SHARD_INDEX": "0",
-                    "SHARD_TOTAL": "1",
-                    "GATE_DECISION": "not_applicable",
-                    "GITHUB_STEP_SUMMARY": str(summary_file),
-                }
-            ):
-                mdx_repair_canary.summary_command(artifact_dir, repo)
-            record = json.loads(
-                (repo / ".openclaw-sync/canary-release-summary-zh-CN-s0of1.json").read_text(encoding="utf-8")
-            )
-            self.assertIn("artifact_metadata_missing", record["remaining_risks"])
-
-    def _r2_smoke(
-        self, repo: Path, page_body: str | None, live_html: str | None, **overrides: str
-    ) -> tuple[dict[str, str], list[str]]:
-        if page_body is not None:
-            page = repo / "docs/zh-CN/channels/line.mdx"
-            page.parent.mkdir(parents=True, exist_ok=True)
-            page.write_text(page_body, encoding="utf-8")
-        fetches: list[str] = []
-
-        def fake_fetch(url: str, timeout_seconds: int = 30) -> str:
-            fetches.append(url)
-            if live_html is None:
-                raise AssertionError("fetch_text must not be called")
-            return live_html
-
-        output = repo / "github-output.txt"
-        values = {
-            "LOCALE": "zh-CN",
-            "R2_SMOKE_REQUIRE_VERIFIED": "1",
-            "R2_SMOKE_UNVERIFIED_REASON": "",
-            "GITHUB_OUTPUT": str(output),
-        }
-        values.update(overrides)
-        with chdir(repo), env(values):  # type: ignore[arg-type]
-            with patch.object(mdx_repair_canary.dispatch_r2_pages, "fetch_text", side_effect=fake_fetch):
-                mdx_repair_canary.r2_smoke_command(
-                    "zh-CN",
-                    "channels/line",
-                    "https://docs.openclaw.ai/zh-CN/channels/line",
-                    repo / "docs",
-                    2,
-                    1,
-                )
-        outputs = dict(
-            line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines() if "=" in line
-        )
-        return outputs, fetches
-
-    def test_r2_smoke_derives_expected_h1_from_artifact_page(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            page = "---\ntitle: LINE\n---\n\n# `LINE` channel\n\nbody\n"
-            outputs, fetches = self._r2_smoke(repo, page, "<html><h1>LINE channel</h1></html>")
-            self.assertEqual("verified", outputs["r2_smoke"])
-            self.assertEqual("LINE channel", outputs["expected_h1"])
-            self.assertEqual(1, len(fetches))
-
-    def test_r2_smoke_fails_required_on_live_mismatch(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            page = "---\ntitle: LINE\n---\n\n# LINE channel\n"
-            with self.assertRaisesRegex(SystemExit, "R2 content smoke finished mismatch"):
-                self._r2_smoke(repo, page, "<html><h1>行</h1></html>")
-            outputs, _ = self._r2_smoke(repo, page, "<html><h1>行</h1></html>", R2_SMOKE_REQUIRE_VERIFIED="0")
-            self.assertEqual("mismatch", outputs["r2_smoke"])
-            self.assertTrue(outputs["r2_smoke_reason"].startswith("live_h1_mismatch"))
-
-    def test_r2_smoke_records_unverified_reason_without_fetching(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            page = "# LINE channel\n"
-            outputs, fetches = self._r2_smoke(
-                repo,
-                page,
-                None,
-                R2_SMOKE_REQUIRE_VERIFIED="0",
-                R2_SMOKE_UNVERIFIED_REASON="dispatch_no_wait_final_publication_covered_by_locale_full_deploys",
-            )
-            self.assertEqual("unverified", outputs["r2_smoke"])
-            self.assertEqual(
-                "dispatch_no_wait_final_publication_covered_by_locale_full_deploys",
-                outputs["r2_smoke_reason"],
-            )
-            self.assertEqual([], fetches)
-
-    def test_r2_smoke_marks_missing_artifact_page_explicitly(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            with self.assertRaisesRegex(SystemExit, "artifact_page_missing"):
-                self._r2_smoke(repo, None, "<h1>anything</h1>")
-            outputs, _ = self._r2_smoke(repo, None, "<h1>anything</h1>", R2_SMOKE_REQUIRE_VERIFIED="0")
-            self.assertEqual("unverified", outputs["r2_smoke"])
-            self.assertTrue(outputs["r2_smoke_reason"].startswith("artifact_page_missing"))
-
-    def test_artifact_h1_skips_frontmatter_and_falls_back_to_title(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            page = repo / "page.mdx"
-            page.write_text("---\ntitle: Frontmatter Title\n---\n\nbody without heading\n", encoding="utf-8")
-            self.assertEqual(("Frontmatter Title", ""), mdx_repair_canary.artifact_h1(page))
-            page.write_text("---\ntitle: Ignored\n---\n\n# Heading Wins\n", encoding="utf-8")
-            self.assertEqual(("Heading Wins", ""), mdx_repair_canary.artifact_h1(page))
-            page.write_text("no heading at all\n", encoding="utf-8")
-            h1, note = mdx_repair_canary.artifact_h1(page)
-            self.assertEqual("", h1)
-            self.assertTrue(note.startswith("artifact_h1_missing"))
 
 
 if __name__ == "__main__":

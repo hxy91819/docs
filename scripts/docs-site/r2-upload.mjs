@@ -19,6 +19,7 @@ const sessionToken = process.env.OPENCLAW_R2_SESSION_TOKEN || process.env.AWS_SE
 const region = process.env.OPENCLAW_R2_REGION || "auto";
 const service = "s3";
 const retryAttempts = Number.parseInt(process.env.R2_UPLOAD_RETRIES || "5", 10);
+const fetchTimeoutMs = Number(process.env.R2_UPLOAD_FETCH_TIMEOUT_MS || "30000");
 const deleteOrphans = process.env.R2_DELETE_ORPHANS !== "0";
 const deleteBucketOrphans = process.env.R2_DELETE_BUCKET_ORPHANS !== "0";
 const fullRefresh = process.env.R2_UPLOAD_FORCE === "1" || process.env.R2_UPLOAD_FULL_REFRESH === "1";
@@ -38,6 +39,10 @@ const protectedKeys = new Set([
 
 if (!Number.isFinite(concurrency) || concurrency < 1) throw new Error("R2_UPLOAD_CONCURRENCY must be a positive integer");
 if (!Number.isFinite(refreshConcurrency) || refreshConcurrency < 1) throw new Error("R2_REFRESH_CONCURRENCY must be a positive integer");
+// Larger delays overflow Node timers and can become one-millisecond timeouts.
+if (!Number.isInteger(fetchTimeoutMs) || fetchTimeoutMs < 1 || fetchTimeoutMs > 2_147_483_647) {
+  throw new Error("R2_UPLOAD_FETCH_TIMEOUT_MS must be an integer between 1 and 2147483647 milliseconds");
+}
 if (!fs.existsSync(manifestPath)) throw new Error(`${path.relative(root, manifestPath) || manifestPath} does not exist; run the matching build step first`);
 if (!dryRun && !endpoint) throw new Error("OPENCLAW_R2_S3_ENDPOINT or CLOUDFLARE_ACCOUNT_ID is required");
 if (!dryRun && !accessKeyId) throw new Error("OPENCLAW_R2_ACCESS_KEY_ID or AWS_ACCESS_KEY_ID is required");
@@ -45,6 +50,8 @@ if (!dryRun && !secretAccessKey) throw new Error("OPENCLAW_R2_SECRET_ACCESS_KEY 
 
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 if (!Array.isArray(manifest.entries)) throw new Error("dist/docs-r2-manifest.json must contain an entries array");
+const remoteManifest = await getRemoteManifest();
+const remoteEntries = new Map((remoteManifest?.entries || []).map((entry) => [entry.key, entry]));
 const scopedEntries = filterEntriesByScope(manifest.entries, uploadScope);
 if ((uploadScope === "page" || uploadScope === "locale") && scopedEntries.length === 0) {
   throw new Error(`R2_UPLOAD_SCOPE=${uploadScope} matched zero manifest entries`);
@@ -52,11 +59,9 @@ if ((uploadScope === "page" || uploadScope === "locale") && scopedEntries.length
 if (uploadScope === "locale" && !scopedEntries.some((entry) => isLocaleManifestEntry(entry, uploadLocale))) {
   throw new Error(`R2_UPLOAD_SCOPE=locale matched no entries for locale ${uploadLocale}`);
 }
-const remoteManifest = await getRemoteManifest();
 if (partialUpload && !dryRun && remoteManifest.status !== "hit" && process.env.R2_UPLOAD_ALLOW_PARTIAL_WITHOUT_REMOTE !== "1") {
   throw new Error("Partial R2 upload requires an existing remote manifest; run a full upload first or set R2_UPLOAD_ALLOW_PARTIAL_WITHOUT_REMOTE=1");
 }
-const remoteEntries = new Map((remoteManifest?.entries || []).map((entry) => [entry.key, entry]));
 const localKeys = new Set(partialUpload ? remoteEntries.keys() : scopedEntries.map((entry) => entry.key));
 for (const entry of scopedEntries) localKeys.add(entry.key);
 localKeys.add(remoteManifestKey);
@@ -119,6 +124,7 @@ function isLocaleScopedEntry(entry, locale) {
   // search objects keeps a successful locale publish discoverable without
   // falling back to a full-site page upload.
   if (key.startsWith("pagefind/")) return true;
+  if (markdownTargetKeys(entry).some((target) => target.startsWith(`${locale}/`))) return true;
   return isLocaleManifestEntry(entry, locale);
 }
 
@@ -129,7 +135,14 @@ function isLocaleManifestEntry(entry, locale) {
 
 function isPageScopedEntry(entry, locale, pagePath) {
   const keys = pageScopedKeys(locale, pagePath);
-  return keys.has(entry.key);
+  return keys.has(entry.key) || markdownTargetKeys(entry).some((target) => keys.has(target));
+}
+
+function markdownTargetKeys(entry) {
+  // A translation publish owns aliases targeting that page, including aliases
+  // switching to or from English fallback and compatibility-prefixed aliases.
+  return [entry, remoteEntries.get(entry.key)].map((value) =>
+    markdownTarget(value).split(/[?#]/u)[0].replace(/^\//u, ""));
 }
 
 function pageScopedKeys(locale, pagePath) {
@@ -202,23 +215,31 @@ function writeUploadManifest(localManifest, currentRemoteManifest, entries) {
 async function getRemoteManifest() {
   if (remoteManifestPath) {
     const file = path.isAbsolute(remoteManifestPath) ? remoteManifestPath : path.join(root, remoteManifestPath);
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-    return {
-      ...parsed,
-      manifestSource: "file",
-      status: "hit",
-    };
+    return remoteManifestHit(JSON.parse(fs.readFileSync(file, "utf8")), "file");
   }
   if (dryRun) return { entries: [], source: "dry-run", status: "missing" };
   const response = await signedFetchWithRetry("GET", remoteManifestKey);
   if (response.status === 404) return { entries: [], source: "r2", status: "missing" };
   if (!response.ok) throw new Error(`GET manifest failed: ${response.status} ${await response.text()}`);
   const text = await response.text();
+  let parsed;
   try {
-    return { ...JSON.parse(text), manifestSource: "r2", status: "hit" };
+    parsed = JSON.parse(text);
   } catch (error) {
     throw new Error(`GET manifest returned invalid JSON; refusing to reupload the full docs tree: ${error.message}`);
   }
+  return remoteManifestHit(parsed, "r2");
+}
+
+function remoteManifestHit(parsed, source) {
+  if (!Array.isArray(parsed?.entries)) {
+    throw new Error("remote manifest must contain an entries array; refusing to reupload the full docs tree");
+  }
+  return {
+    ...parsed,
+    manifestSource: source,
+    status: "hit",
+  };
 }
 
 async function createUploadPlan(entries, remoteEntriesByKey) {
@@ -293,7 +314,12 @@ function diffManifestEntry(remote, entry) {
   if (remote.sha256 !== entry.sha256) return "sha256";
   if (remote.contentType !== entry.contentType) return "content_type";
   if (remote.cacheControl !== entry.cacheControl) return "cache_control";
+  if (markdownTarget(remote) !== markdownTarget(entry)) return "markdown_target";
   return "";
+}
+
+function markdownTarget(entry) {
+  return entry?.customMetadata?.["openclaw-markdown-target"] ?? "";
 }
 
 function diffHeadEntry(head, remote, entry) {
@@ -302,6 +328,7 @@ function diffHeadEntry(head, remote, entry) {
   if (head.size !== undefined && head.size !== entry.size) return "size";
   if (head.contentType && head.contentType !== entry.contentType) return "content_type";
   if (head.cacheControl && head.cacheControl !== entry.cacheControl) return "cache_control";
+  if (head.markdownTarget !== markdownTarget(entry)) return "markdown_target";
   if (head.sha256 && head.sha256 !== entry.sha256) return "sha256";
   if (head.md5 && entry.md5 && head.md5 !== entry.md5) return "md5";
   if (head.etagMd5 && entry.md5) return head.etagMd5 === entry.md5 ? "" : "etag";
@@ -317,6 +344,7 @@ async function headObject(entry) {
     contentType: response.headers.get("content-type") || "",
     etagMd5: md5FromEtag(response.headers.get("etag") || ""),
     md5: response.headers.get("x-amz-meta-openclaw-md5") || "",
+    markdownTarget: response.headers.get("x-amz-meta-openclaw-markdown-target") || "",
     sha256: response.headers.get("x-amz-meta-openclaw-sha256") || "",
     size: numberHeader(response.headers.get("content-length")),
     source: "head",
@@ -462,6 +490,7 @@ async function putObject(entry) {
     "content-type": entry.contentType,
     "x-amz-meta-openclaw-md5": entry.md5 || md5Hex(body),
     "x-amz-meta-openclaw-sha256": entry.sha256 || sha256Hex(body),
+    ...(markdownTarget(entry) ? { "x-amz-meta-openclaw-markdown-target": markdownTarget(entry) } : {}),
     "x-amz-content-sha256": entry.sha256 || sha256Hex(body),
   });
   if (!response.ok) throw new Error(`R2 upload failed for ${entry.key}: ${response.status} ${await response.text()}`);
@@ -477,11 +506,11 @@ async function deleteObject(entry) {
   if (!response.ok) throw new Error(`R2 delete failed for ${entry.key}: ${response.status} ${await response.text()}`);
 }
 
-async function signedFetchWithRetry(method, key, body, headers = {}, query = {}) {
+async function signedFetchWithRetry(method, key, body, headers = {}, query = {}, options = {}) {
   let lastError;
   for (let attempt = 0; attempt <= retryAttempts; attempt++) {
     try {
-      const response = await signedFetch(method, key, body, headers, query);
+      const response = await signedFetch(method, key, body, headers, query, options);
       if (!isRetryableStatus(response.status) || attempt === retryAttempts) return response;
       lastError = new Error(`HTTP ${response.status}`);
       await response.arrayBuffer().catch(() => {});
@@ -494,7 +523,7 @@ async function signedFetchWithRetry(method, key, body, headers = {}, query = {})
   throw lastError;
 }
 
-async function signedFetch(method, key, body, headers = {}, query = {}) {
+async function signedFetch(method, key, body, headers = {}, query = {}, options = {}) {
   const encodedKey = key ? `/${encodeS3Key(key)}` : "";
   const url = new URL(`${endpoint.replace(/\/$/, "")}/${bucket}${encodedKey}`);
   const canonicalQuery = canonicalQueryString(query);
@@ -534,7 +563,16 @@ async function signedFetch(method, key, body, headers = {}, query = {}) {
     body,
     headers: { ...normalizedHeaders, authorization },
     method,
+    signal: resolveFetchSignal(options.signal),
   });
+}
+
+function resolveFetchSignal(callerSignal) {
+  const timeoutSignal = AbortSignal.timeout(fetchTimeoutMs);
+  if (!callerSignal) return timeoutSignal;
+  return typeof AbortSignal.any === "function"
+    ? AbortSignal.any([callerSignal, timeoutSignal])
+    : callerSignal;
 }
 
 function isRetryableStatus(status) {

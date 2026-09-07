@@ -90,11 +90,17 @@ export default {
       return markdownResponse(env, ctx, request, url.pathname);
     }
 
+    let owner: Response | undefined;
     if (prefersMarkdown(request)) {
       const markdownPath = markdownPathFor(url.pathname);
       if (markdownPath) {
-        const response = await markdownResponse(env, ctx, request, markdownPath);
-        if (response.status !== 404) return response;
+        const key = r2ObjectKey(markdownPath.slice(0, -".md".length));
+        // Dotted objects negotiate only when current R2 metadata identifies HTML.
+        if (/\.[^/]+$/.test(key)) owner = await r2Fetch(env, "HEAD", key);
+        if (!owner || (owner.ok && isHtmlResponse(owner))) {
+          const response = await markdownResponse(env, ctx, request, markdownPath, owner);
+          if (response.status !== 404) return response;
+        }
       }
     }
 
@@ -103,7 +109,7 @@ export default {
       return Response.redirect(url.toString(), 308);
     }
 
-    return assetResponse(env, ctx, request, r2AssetPath(url.pathname));
+    return assetResponse(env, ctx, request, r2AssetPath(url.pathname), owner);
   },
 };
 
@@ -369,7 +375,7 @@ function prefersMarkdown(request: Request): boolean {
 function markdownPathFor(pathname: string): string | null {
   const clean = pathname.replace(/\/+$/, "") || "/";
   if (clean === "/") return "/index.md";
-  if (/\.[^/]+$/.test(clean)) return null;
+  if (r2ObjectKey(clean).endsWith(".html")) return null;
   return `${clean}.md`;
 }
 
@@ -378,8 +384,23 @@ function r2AssetPath(pathname: string): string {
   return pathname;
 }
 
-async function markdownResponse(env: Env, ctx: ExecutionContext, request: Request, pathname: string): Promise<Response> {
-  const response = await assetResponse(env, ctx, request, pathname);
+async function markdownResponse(env: Env, ctx: ExecutionContext, request: Request, pathname: string, owner?: Response): Promise<Response> {
+  let response = await assetResponse(env, ctx, request, pathname);
+  if (response.status === 404) {
+    // Resolve current alias metadata at R2 so translation publishes can change the target.
+    let target = owner?.headers.get("x-amz-meta-openclaw-markdown-target");
+    if (!owner) {
+      const alias = pathname.slice(0, -".md".length);
+      const key = alias === "/index" ? "index.html" : r2ObjectKey(alias);
+      const object = await env.DOCS_BUCKET?.head(key)
+        ?? (alias === "/index" ? await env.DOCS_BUCKET?.head("index") : null);
+      target = object?.customMetadata?.["openclaw-markdown-target"];
+    }
+    if (target) {
+      // Cache the whole document by its canonical path, never by the missing alias.
+      response = await assetResponse(env, ctx, request, target.split(/[?#]/u)[0]);
+    }
+  }
   const headers = new Headers(response.headers);
   if (response.ok) {
     headers.set("Content-Type", "text/markdown; charset=utf-8");
@@ -392,15 +413,20 @@ async function markdownResponse(env: Env, ctx: ExecutionContext, request: Reques
   });
 }
 
-async function assetResponse(env: Env, ctx: ExecutionContext, request: Request, pathname: string): Promise<Response> {
+async function assetResponse(env: Env, ctx: ExecutionContext, request: Request, pathname: string, owner?: Response): Promise<Response> {
   const cache = caches.default;
+  const key = r2ObjectKey(pathname);
+  const objectPath = `/${key}`;
+  // HTML is mutable at a stable URL. Read it from the R2 binding so a docs
+  // upload becomes visible without requiring a global Cache API purge.
+  const useWorkerCache = !isHtmlPath(objectPath);
   const cacheKey = cacheRequest(request, pathname);
-  const cached = request.method === "GET" ? await cache.match(cacheKey) : undefined;
-  if (cached) {
+  const cached = request.method === "GET" && useWorkerCache ? await cache.match(cacheKey) : undefined;
+  if (cached && !isHtmlResponse(cached) && !(owner && isHtmlResponse(owner))) {
     const headers = new Headers(cached.headers);
     headers.set("X-OpenClaw-Docs-Cache", "HIT");
-    applyCacheHeaders(headers, pathname);
-    applyMarkdownAlternateHeader(headers, pathname);
+    applyCacheHeaders(headers, objectPath, false);
+    applyMarkdownAlternateHeader(headers, pathname, false);
     return new Response(request.method === "HEAD" ? null : cached.body, {
       status: cached.status,
       statusText: cached.statusText,
@@ -408,25 +434,28 @@ async function assetResponse(env: Env, ctx: ExecutionContext, request: Request, 
     });
   }
 
-  const key = r2ObjectKey(pathname);
-  const response = await r2Fetch(env, request.method, key);
+  const response = request.method === "HEAD" && owner ? owner : await r2Fetch(env, request.method, key);
   if (response.status === 404) {
-    return isHtmlPath(pathname) ? docsNotFoundResponse(request, pathname) : plainNotFoundResponse(request);
+    return isHtmlPath(objectPath) ? docsNotFoundResponse(request, pathname) : plainNotFoundResponse(request);
   }
+  const isHtml = isHtmlPath(objectPath) || isHtmlResponse(response);
   const responseHeaders = new Headers(response.headers);
   responseHeaders.set("X-OpenClaw-Docs-Origin", "cloudflare-r2");
   responseHeaders.set("X-OpenClaw-Docs-Cache", "MISS");
   responseHeaders.delete("Content-Length");
   if (response.ok) {
-    applyCacheHeaders(responseHeaders, pathname);
-    applyMarkdownAlternateHeader(responseHeaders, pathname);
+    applyCacheHeaders(responseHeaders, objectPath, isHtml);
+    applyMarkdownAlternateHeader(responseHeaders, pathname, isHtml);
+    if (isHtml && markdownPathFor(new URL(request.url).pathname)) {
+      responseHeaders.set("Vary", appendVary(responseHeaders.get("Vary"), "Accept"));
+    }
   }
   const finalResponse = new Response(request.method === "HEAD" ? null : response.body, {
     status: response.status,
     statusText: response.statusText,
     headers: responseHeaders,
   });
-  if (request.method === "GET" && finalResponse.ok) {
+  if (request.method === "GET" && finalResponse.ok && useWorkerCache && !isHtml) {
     const cacheHeaders = new Headers(finalResponse.headers);
     cacheHeaders.delete("Set-Cookie");
     const cacheResponse = new Response(finalResponse.clone().body, {
@@ -766,30 +795,27 @@ async function r2Fetch(env: Env, method: string, key: string): Promise<Response>
 function cacheRequest(request: Request, pathname: string): Request {
   const url = new URL(request.url);
   url.pathname = pathname;
-  if (isHtmlPath(pathname)) {
-    url.searchParams.set("__openclaw_docs_cache_minute", String(Math.floor(Date.now() / 60_000)));
-  }
   return new Request(url.toString(), {
     headers: request.headers,
     method: "GET",
   });
 }
 
-function applyCacheHeaders(headers: Headers, pathname: string): void {
-  headers.set("Cache-Control", browserCacheControlFor(pathname));
-  const cdnCacheControl = edgeCacheControlFor(pathname);
+function applyCacheHeaders(headers: Headers, pathname: string, isHtml: boolean): void {
+  headers.set("Cache-Control", browserCacheControlFor(pathname, isHtml));
+  const cdnCacheControl = edgeCacheControlFor(pathname, isHtml);
   headers.set("CDN-Cache-Control", cdnCacheControl);
   headers.set("Cloudflare-CDN-Cache-Control", cdnCacheControl);
 }
 
-function applyMarkdownAlternateHeader(headers: Headers, pathname: string): void {
-  const markdownPath = markdownAlternatePathFor(pathname);
+function applyMarkdownAlternateHeader(headers: Headers, pathname: string, isHtml: boolean): void {
+  const markdownPath = markdownAlternatePathFor(pathname, isHtml);
   if (!markdownPath) return;
   headers.set("Link", appendLink(headers.get("Link"), `<${markdownPath}>; rel="alternate"; type="text/markdown"`));
 }
 
-function markdownAlternatePathFor(pathname: string): string | null {
-  if (!isHtmlPath(pathname)) return null;
+function markdownAlternatePathFor(pathname: string, isHtml: boolean): string | null {
+  if (!isHtml) return null;
   if (pathname === "/" || pathname === "/index.html") return "/index.md";
   const clean = pathname.replace(/\/+$/, "");
   if (clean.endsWith("/index.html")) return `${clean.slice(0, -"/index.html".length)}.md`;
@@ -797,8 +823,8 @@ function markdownAlternatePathFor(pathname: string): string | null {
   return `${clean}.md`;
 }
 
-function browserCacheControlFor(pathname: string): string {
-  if (isHtmlPath(pathname)) {
+function browserCacheControlFor(pathname: string, isHtml: boolean): string {
+  if (isHtml) {
     return "public, max-age=60, stale-while-revalidate=60";
   }
   if (isShellAssetPath(pathname)) {
@@ -810,8 +836,8 @@ function browserCacheControlFor(pathname: string): string {
   return "public, max-age=31536000, immutable";
 }
 
-function edgeCacheControlFor(pathname: string): string {
-  if (isHtmlPath(pathname)) {
+function edgeCacheControlFor(pathname: string, isHtml: boolean): string {
+  if (isHtml) {
     return "public, s-maxage=60, stale-while-revalidate=60";
   }
   if (isShellAssetPath(pathname)) {
@@ -838,6 +864,10 @@ function isShellAssetPath(pathname: string): boolean {
 
 function isHtmlPath(pathname: string): boolean {
   return pathname.endsWith(".html") || !/\.[^/]+$/.test(pathname);
+}
+
+function isHtmlResponse(response: Response): boolean {
+  return response.headers.get("Content-Type")?.toLowerCase().startsWith("text/html") ?? false;
 }
 
 function appendVary(current: string | null, value: string): string {

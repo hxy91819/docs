@@ -96,6 +96,8 @@ This command connects Gmail transport but does not create a restricted reader ag
 
 <Warning>Setup output is sensitive: `--json` includes `hookToken` and `pushToken`, and the push endpoint printed in either format can contain its token. Redact output before sharing it.</Warning>
 
+Command failures show bounded tails from both stdout and stderr, with terminal colors and progress redraws removed. Exit codes and recorded termination reasons distinguish timeouts, signals, and output limits; exit code `124` alone does not mean a timeout. An omission marker (`…`) indicates truncated output. These diagnostics can still contain sensitive command output: redact them before sharing.
+
 `--port`, `--max-bytes`, and `--renew-minutes` require positive integers, without unit suffixes. `--include-body` has no negative CLI flag: set `hooks.gmail.includeBody: false` and let `run` inherit it.
 
 ## `webhooks gmail run`
@@ -104,7 +106,7 @@ This command connects Gmail transport but does not create a restricted reader ag
 openclaw webhooks gmail run --account you@example.com
 ```
 
-Starts the Gmail watch and runs `gog gmail watch serve` plus periodic watch renewal in the foreground. An unexpected exit of the initial serve process schedules a restart after 2 seconds. Stop with Ctrl-C; investigate repeated exits in the logs.
+Starts the Gmail watch and runs `gog gmail watch serve` plus periodic watch renewal in the foreground. Unexpected serve-process exits continue to restart after 5 seconds. A bind conflict stops restarts; run only one watcher per listener and stop the other watcher before retrying. Ctrl-C or SIGTERM cancels pending restarts and renewal work and shuts down the serve process tree. Investigate repeated exits in the logs.
 
 `run` accepts the same Pub/Sub, OpenClaw delivery, `gog gmail watch serve`, and Tailscale flags as `setup`, except:
 

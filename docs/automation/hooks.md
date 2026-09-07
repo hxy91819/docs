@@ -45,12 +45,12 @@ the same profile and config as that Gateway:
 openclaw hooks list
 openclaw hooks info command-logger
 openclaw hooks enable command-logger
-openclaw gateway restart
 ```
 
-`gateway restart` applies to an installed Gateway service. If you run the Gateway
-in the foreground, stop and start that process instead. Add `--agent <id>` to
-hook commands when your configuration has multiple agents and no implicit owner.
+The default `hybrid` [reload mode](/gateway/configuration#reload-modes) applies
+hook config changes without a restart. With reload mode `off`, run
+`openclaw gateway restart`, or restart a foreground Gateway yourself. Add
+`--agent <id>` when your configuration has multiple agents and no implicit owner.
 
 In a conversation you can safely reset, send `/new` or `/reset` as an authorized
 user. Then inspect the log on the Gateway host:
@@ -69,7 +69,6 @@ it if you do not want to retain those records:
 
 ```bash
 openclaw hooks disable command-logger
-openclaw gateway restart
 ```
 
 ### Eligible, enabled, and loaded
@@ -88,7 +87,12 @@ Keep these three checks separate:
 The CLI's `ready`, `eligible`, and `loadable` fields describe the first two checks
 plus a nonempty event list. They do **not** prove that the Gateway imported the
 handler, that the global selection includes it, or that its event has fired.
-After changes, restart and verify the actual side effect or hook-specific log.
+After changes, verify the actual side effect or hook-specific log.
+
+Config reload prepares the selected handlers before replacing them together.
+If a selected handler cannot load, the previous handlers stay active. An event
+already running finishes with its original handlers; subsequent events use the
+new selection. Reload does not replay `gateway:startup`.
 
 ### Local, remote, and agent scope
 
@@ -102,8 +106,8 @@ They do not update a remote Gateway over RPC. Run them on the Gateway host to
 change that host's hooks.
 
 `--agent <id>` selects the workspace to inspect, not an isolated hook registry.
-The saved `hooks.internal.entries.<hookKey>` entry is global. Gateway startup
-loads directory hooks from its startup workspace into a process-wide registry;
+The saved `hooks.internal.entries.<hookKey>` entry is global. The Gateway
+loads directory hooks from its selected workspace into a process-wide registry;
 it does not load every agent's `hooks/` directory merely because you inspected
 it. A loaded handler must filter the event's agent or session when it should
 only act for a particular agent. See [Hook discovery](/automation/hooks#hook-discovery).
@@ -157,7 +161,6 @@ Enable and load it:
 ```bash
 openclaw hooks info reset-greeting
 openclaw hooks enable reset-greeting
-openclaw gateway restart
 ```
 
 Send `/new` in a disposable conversation on a configured chat channel that can
@@ -176,7 +179,6 @@ Disable the example when finished:
 
 ```bash
 openclaw hooks disable reset-greeting
-openclaw gateway restart
 ```
 
 Disabling leaves the files in place. To use a workspace directory instead, put
@@ -348,27 +350,43 @@ Directory discovery merges hooks by **name** using these rules:
 | Extra directories | `hooks.internal.load.extraDirs`; same source policy as managed hooks. Later extra directories win over earlier ones; the managed directory wins over extra directories. |
 | Workspace         | `<workspace>/hooks/`; can add names but cannot replace bundled, plugin, or managed names. Explicit opt-in required.                                                     |
 
-Each scanned directory contains child hook directories or child packages whose
-`package.json` declares `openclaw.hooks`. The scanner does not treat the scan
-root itself as a hook. For example, with
-`/opt/openclaw-hook-library/my-hook/HOOK.md`, add the parent directory:
+Bundled, managed, workspace, and plugin hook locations are collection
+directories: discovery inspects their immediate children for hooks or packages
+whose `package.json` declares `openclaw.hooks`.
+
+Each explicit `hooks.internal.load.extraDirs` path can instead be a pack root,
+a single-hook root, or a collection directory. A pack root loads only its
+declared hook paths, including nested paths such as `./hooks/my-hook`. Each
+path must point directly to a hook; discovery does not recurse into another
+pack or collection. A recognized pack with no valid hooks stays empty rather
+than scanning unlisted children. A single-hook root loads its own `HOOK.md`
+and handler. Only an ordinary collection root gets the immediate-child scan.
+
+For example, to select `/opt/openclaw-hook-library/my-hook/HOOK.md` directly,
+add that hook's directory:
 
 ```json
 {
   "hooks": {
     "internal": {
       "load": {
-        "extraDirs": ["/opt/openclaw-hook-library"]
+        "extraDirs": ["/opt/openclaw-hook-library/my-hook"]
       }
     }
   }
 }
 ```
 
-Only add trusted directories: this also opens selection beyond named entries.
+To scan the library's immediate children instead, add
+`/opt/openclaw-hook-library`. Only add trusted directories: any extra path
+opens hook-name selection across discovery sources beyond named entries,
+even when that path selects a single hook or pack.
 Handler files must stay within their hook directory; package and plugin hook
 paths must stay within their package root. Symlinks escaping those boundaries
-are rejected. Restart after changing hook files, metadata, or configuration.
+are rejected. Hook config and selected-workspace changes reload discovery in
+`hybrid` mode, including config written by a new hook-pack install or link. Hook
+files and metadata are not watched; restart after editing them or updating
+existing hook code, then verify the handler's actual side effect.
 
 ### Hook packs
 
@@ -380,7 +398,7 @@ unified installer:
 openclaw plugins install <path-or-spec>
 ```
 
-Installation and update flags, npm restrictions, linked-directory caveats, and
+Installation and update flags, npm restrictions, linked-root behavior and trust, and
 the deprecated `hooks install` / `hooks update` aliases are documented in
 [Install and update hook packs](/cli/hooks#install-and-update-hook-packs).
 
@@ -394,8 +412,8 @@ the deprecated `hooks install` / `hooks update` aliases are documented in
 | `compaction-notifier`   | `session:compact:before`, `session:compact:after`    | Add compaction status notices on supported delivery paths. |
 | `session-memory`        | `command:new`, `command:reset`, `session:auto-reset` | Save recent conversation excerpts to workspace memory.     |
 
-Enable one with `openclaw hooks enable <hook-name>`, then restart and verify its
-side effect. The following sections describe what to expect.
+Enable one with `openclaw hooks enable <hook-name>` and verify its side effect.
+Startup-only hooks such as `boot-md` wait for the next Gateway start.
 
 <a id="boot-md"></a>
 
@@ -407,8 +425,9 @@ selected for that workspace. Startup tasks run sequentially; a failed task is
 logged and does not prevent later tasks.
 
 This executes instructions through an agent run, not as a shell script and not
-as a bootstrap file injection. It uses a temporary `agent:<id>:boot` session and
-preserves the prior session mapping. Normal final-response delivery is disabled;
+as a bootstrap file injection. Each run uses a fresh temporary
+`agent:<id>:boot:<run-id>` session, cleaned up after success or failure. Existing
+sessions and their history are preserved. Normal final-response delivery is disabled;
 if the instructions need to notify someone, they must specify a channel and
 target for the message tool. Missing or empty files are skipped.
 
@@ -505,8 +524,9 @@ command source or automatic reset reason.
 | `llmSlug`    | `false`       | Ask a model for a descriptive filename slug.                                                                    |
 | `model`      | Agent default | Optional configured alias, bare model ID on the default provider, or `provider/model` used for slug generation. |
 
-The hook captures a bounded transcript snapshot before background writing
-(up to 4,096 scanned messages and 8 MiB for that capture).
+The hook captures the departing conversation before a reset closes its active
+window, then writes the snapshot in the background. Capture is bounded to
+4,096 scanned messages and 8 MiB.
 Manual resets do not await the file write or optional slug-model call; automatic
 reset dispatch also runs independently of the successor turn. Wait for
 `Session context saved to ...` in logs before expecting the file.
@@ -720,12 +740,16 @@ JSON output fields, exit behavior, and install/update aliases.
 
 Check the report's `workspaceDir` and `managedHooksDir` with
 `openclaw hooks list --json`. Confirm you are inspecting the intended host,
-profile, and agent. The hook must be a child directory containing `HOOK.md` and
-one supported handler file; a metadata file alone is insufficient.
+profile, and agent. Each hook needs `HOOK.md` and one supported handler file;
+a metadata file alone is insufficient. Collection locations inspect immediate
+children. An explicit extra path or linked root can itself be a hook or pack.
+For a pack, verify that `openclaw.hooks` lists the intended hook directories
+directly: nested packs and collections are not followed, and rejected entries
+do not cause unlisted children to be scanned.
 
 Check duplicate names and containment warnings in Gateway logs. A workspace
 hook cannot override a bundled or managed hook. For extra directories and
-linked packs, verify the scan-root layout described under
+linked packs, verify the root layout described under
 [Hook discovery](/automation/hooks#hook-discovery).
 
 ### Hook not eligible
@@ -743,9 +767,9 @@ without proving that its module imports successfully.
 ### Hook not executing
 
 Check `hooks.internal.enabled`, the configured-name selection, and the hook's
-`hookKey` entry. Restart after changes. A `ready` report does not override the
-master switch or name selection and does not mean a non-startup agent's workspace
-was loaded.
+`hookKey` entry and [reload mode](/gateway/configuration#reload-modes). A `ready`
+report does not override the master switch or name selection and does not mean
+another agent's workspace was loaded.
 
 ```bash
 openclaw logs --follow
@@ -767,5 +791,5 @@ resolved agent workspace rather than assuming the default workspace.
 - [CLI Reference: hooks](/cli/hooks)
 - [Plugin hooks](/plugins/hooks)
 - [Webhooks](/automation/cron-jobs#webhooks)
-- [Configuration](/gateway/configuration-reference#hooks)
+- [Configuration](/gateway/config-hooks#hooks)
 - [Agent workspace](/concepts/agent-workspace)

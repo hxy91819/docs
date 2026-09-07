@@ -2,10 +2,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { DomUtils, parseDocument } from "htmlparser2";
 
 import { ignoredDocDirs, localeFlags, localeLabels, mintlifyLocaleToDir } from "./config.mjs";
+import { chromeStrings } from "./chrome-strings.mjs";
 import { editSourceUrlForPage, frontmatterSourcePath, readSourceMetadata } from "./edit-source.mjs";
-import { parseFrontmatter } from "./frontmatter.mjs";
+import { parseFrontmatter } from "../../.openclaw-sync/lib/docs-markdown.mjs";
 
 const root = process.cwd();
 const site = path.join(root, "dist", "docs-site");
@@ -71,6 +73,7 @@ const poison = [
 for (const locale of activeLocaleCodes()) {
   if (!localeLabels[locale]) throw new Error(`locale metadata: missing label for ${locale}`);
   if (!localeFlags[locale]) throw new Error(`locale metadata: missing flag for ${locale}`);
+  if (!Object.hasOwn(chromeStrings, locale)) throw new Error(`chrome strings: missing translations for ${locale}`);
 }
 
 for (const rel of required) {
@@ -83,6 +86,7 @@ for (const rel of required) {
     if (pattern.test(html)) throw new Error(`${rel}: poison matched ${pattern}`);
   }
 }
+assertLocalizedChrome();
 if (!shellOnly) {
   for (const rel of ["llms-full.txt", ".well-known/llms-full.txt"]) {
     if (fs.existsSync(path.join(site, rel))) throw new Error(`${rel}: full-site LLM corpus should not be emitted`);
@@ -156,6 +160,10 @@ if (!itChannels.includes(`<link rel="alternate" hreflang="x-default" href="${exp
   throw new Error("it channels: x-default hreflang alternate is missing");
 }
 const index = fs.readFileSync(path.join(site, "index.html"), "utf8");
+if (!/<div class="main">\s*<main class="article" id="main">/.test(index)
+  || /<main class="main"/.test(index)) {
+  throw new Error("index: the primary landmark must not use the display-contents layout wrapper");
+}
 if (!index.includes('class="site-footer"') || !index.includes('class="site-footer-links"')) {
   throw new Error("index: site footer is missing");
 }
@@ -304,10 +312,6 @@ if (!/data-language-native/.test(index)
   || !/\.language-native\{display:block;position:absolute/.test(siteCss)) {
   throw new Error("assets: native language select fallback for coarse pointers is missing");
 }
-if (!/tocSpyHoldUntil/.test(siteJs)
-  || !/closeMermaidOverlay\(\);const key=location\.pathname\+location\.search;if\(key===currentDocKey\)\{tocSpyHoldUntil/.test(siteJs)) {
-  throw new Error("assets: toc scrollspy hold or Mermaid-safe same-document popstate guard is missing");
-}
 if (/\.header-links a[\s{:.[]/.test(siteCss)) {
   throw new Error("assets: .header-links descendant anchor rules override .language-option layout; scope to .header-links>a");
 }
@@ -371,9 +375,33 @@ if (!/\.sidebar\{[^}]*scrollbar-width:thin;[^}]*scrollbar-color:/.test(siteCss)
   || !/\.sidebar\.can-scroll-down\{--sidebar-fade-bottom:30px\}/.test(siteCss)) {
   throw new Error("assets: sidebar overflow affordance is missing");
 }
+// The invite floats over the page, so it must stay position:fixed and must never render
+// before the shell script has cleared it against local storage.
+if (!/\.community-invite\{[^}]*position:fixed;[^}]*z-index:65/.test(siteCss)
+  || !/\.community-invite\[hidden\]\{display:none\}/.test(siteCss)) {
+  throw new Error("assets: community invite is not a hidden-by-default floating card");
+}
+// Wide layouts must reserve page padding, or the card covers the end of the article.
+if (!/body\.has-community-invite\{padding-bottom:calc\(var\(--community-invite-h,0px\)/.test(siteCss)) {
+  throw new Error("assets: community invite page reserve is missing");
+}
+// Narrow layouts dock the card in the nav drawer instead of floating it, so it must slide with
+// the drawer and the drawer must reserve room for it rather than the page.
+if (!/@media\(max-width:820px\)\{\.community-invite\{left:0;bottom:0;z-index:91/.test(siteCss)
+  || !/body\.nav-open \.community-invite\{transform:translateX\(0\)\}/.test(siteCss)
+  || !/body\.has-community-invite \.sidebar\{padding-bottom:calc\(var\(--community-invite-h,0px\)/.test(siteCss)) {
+  throw new Error("assets: community invite does not dock into the mobile nav drawer");
+}
+if (!/data-community-invite-dismiss/.test(siteJs)
+  || !/openclaw\.docs\.community-invite/.test(siteJs)
+  || !/card\.hidden=state===null\|\|state\.dismissedAtMs!==undefined/.test(siteJs)) {
+  throw new Error("assets: community invite dismissal is not wired to local storage");
+}
 if (!/\.header-row,\.tabs\{max-width:1780px;margin:0 auto\}/.test(siteCss)
   || !/\.doc-shell\{width:100%;max-width:1780px;margin:0 auto;flex:1 0 auto\}/.test(siteCss)
-  || !/\.doc-shell\{display:grid;grid-template-columns:340px minmax\(0,1fr\);gap:72px;padding:38px 56px 90px\}/.test(siteCss)) {
+  || !/:root\{--shell-pad:56px;--rail-gap:56px;--rail-max:272px;--article-max:820px\}/.test(siteCss)
+  || !/\.doc-shell\{display:grid;grid-template-columns:minmax\(var\(--rail-max\),1fr\) minmax\(0,var\(--article-max\)\) minmax\(var\(--rail-max\),1fr\);gap:var\(--rail-gap\);padding:38px var\(--shell-pad\) 90px\}/.test(siteCss)
+  || !/@media\(max-width:1280px\)[\s\S]*?\.doc-shell\{grid-template-columns:var\(--rail-max\) minmax\(0,1fr\)\}\.article\{width:min\(100%,var\(--article-max\)\);justify-self:center\}/.test(siteCss)) {
   throw new Error("assets: docs shell geometry does not match the wide reference layout");
 }
 if (!/body\{[^}]*font:var\(--oc-font-size-md\)\/1\.7 var\(--oc-font-body\)/.test(siteCss)
@@ -411,24 +439,31 @@ if (!/function scrollActiveNavLink/.test(siteJs)
 }
 if (!/function syncStickyHeaderOffset/.test(siteJs)
   || !/function syncTocDisclosure/.test(siteJs)
+  || !/function compactTocVisible\(\)\{const articleHeader=document\.querySelector\("\.article-header"\)/.test(siteJs)
+  || !/if\(!visible&&toc\.open\)toc\.open=false/.test(siteJs)
   || !/syncStickyHeaderOffset\(\);\s*syncTocDisclosure\(\);\s*initChat\(\);\s*initCodeGroups\(\)/.test(siteJs)) {
   throw new Error("assets: compact page orientation should refresh across PJAX navigation");
 }
-if (!/\.toc\{position:fixed;left:calc\(24px \+ 220px \+ 34px\);top:calc\(var\(--sticky-header-h\) \+ 8px\);z-index:60/.test(siteCss)
+if (!/compactTocQuery=matchMedia\("\(max-width:1280px\)"\)/.test(siteJs)
+  || !/\.toc\{position:fixed;left:var\(--toc-left\);top:calc\(var\(--sticky-header-h\) \+ 8px\);z-index:60/.test(siteCss)
   || !/\.toc\.is-visible,\.toc\[open\]\{opacity:1;visibility:visible;pointer-events:auto;transform:none\}/.test(siteCss)
   || !/\.toc summary\{display:flex;align-items:center;gap:var\(--oc-space-2\)/.test(siteCss)
-  || !/\.toc nav\{position:absolute;left:0;top:calc\(100% \+ 8px\);display:none;width:min\(340px,calc\(100vw - 302px\)\)/.test(siteCss)
-  || !/Math\.max\(scrollY,document\.scrollingElement\?\.scrollTop\|\|0\)>8/.test(siteJs)
-  || !/\.toc\[open\] nav\{display:grid;gap:2px\}/.test(siteCss)) {
+  || !/\.toc nav\{position:absolute;left:0;top:calc\(100% \+ 8px\);display:none;width:min\(340px,var\(--toc-room\)\)/.test(siteCss)
+  || !/\.toc\[open\] nav\{display:grid;align-content:start;gap:2px\}/.test(siteCss)) {
   throw new Error("assets: compact table of contents dropdown is missing for mid-width pages");
+}
+if (!/\.toc\[open\]\{z-index:100\}/.test(siteCss)
+  || !/\.toc\[open\] nav\{position:fixed;inset:calc\(var\(--sticky-header-h\) \+ 52px\) 14px max\(14px,env\(safe-area-inset-bottom\)\) 14px;[^}]*background:var\(--paper\)/.test(siteCss)
+  || !/body:has\(\.toc\[open\]\)\{overflow:hidden\}/.test(siteCss)
+  || !/body:has\(\.toc\[open\]\) \.docs-chat\{visibility:hidden;pointer-events:none\}/.test(siteCss)) {
+  throw new Error("assets: mobile table of contents sheet is missing");
 }
 if (!/let tocObserver=null/.test(siteJs)
   || !/function initTocScrollspy/.test(siteJs)
   || !/new IntersectionObserver/.test(siteJs)
   || !/rootMargin:"-120px 0px -70% 0px"/.test(siteJs)
   || !/scroller\.scrollTop\+innerHeight>=scroller\.scrollHeight-2/.test(siteJs)
-  || !/scrollTarget\(url\.hash\);initTocScrollspy\(\)/.test(siteJs)
-  || !/scrollActiveNavLink\(\);\s*initTocScrollspy\(\);\s*document\.addEventListener\("change"[^;]*language-native[\s\S]{0,200}?document\.addEventListener\("click"/.test(siteJs)) {
+  || !/initTocScrollspy\(\);scrollTarget\(url\.hash\)/.test(siteJs)) {
   throw new Error("assets: table-of-contents scrollspy is missing");
 }
 if (!/function setNavOpen/.test(siteJs) || !/body\.nav-open:before/.test(siteCss) || !/data-nav-close/.test(index)) {
@@ -477,11 +512,25 @@ const platformsIndex = fs.readFileSync(path.join(site, "platforms/index.html"), 
 if (/VPS &amp;amp; hosting/.test(platformsIndex)) {
   throw new Error("platforms index: TOC double-escaped ampersand");
 }
+const execPage = fs.readFileSync(path.join(site, "tools/exec/index.html"), "utf8");
+for (const id of ["session-overrides-(%2Fexec)", "session-overrides-/exec"]) {
+  if (!execPage.includes(`id="${id}"`)) throw new Error(`tools/exec: missing published anchor ${id}`);
+}
 const toolsIndex = fs.readFileSync(path.join(site, "tools/index.html"), "utf8");
 if (/class="anchor"/.test(toolsIndex)) {
   throw new Error("tools index: legacy visible heading permalink anchors should not be rendered");
 }
-if (!/<h2 id="([^"]*choose-tools[^"]*)"[^>]*>Choose tools, skills, or plugins<button type="button" class="heading-anchor" data-heading-anchor="\1" data-copy-label="Copy link to section" aria-label="Copy link to section">[\s\S]*lucide-link[\s\S]*lucide-check[\s\S]*<\/button><\/h2>/.test(toolsIndex)) {
+const toolsHeading = DomUtils.findOne(
+  (node) => node.name === "h2" && DomUtils.textContent(node) === "Choose tools, skills, or plugins",
+  parseDocument(toolsIndex).children,
+);
+const headingCopy = toolsHeading && DomUtils.findOne((node) => node.name === "button", toolsHeading.children);
+if (!toolsHeading?.attribs.id || headingCopy?.attribs["data-heading-anchor"] !== toolsHeading.attribs.id
+  || headingCopy.attribs.type !== "button" || headingCopy.attribs.class !== "heading-anchor"
+  || headingCopy.attribs["aria-label"] !== "Copy link to section"
+  || headingCopy.attribs["data-copy-label"] !== "Copy link to section"
+  || !DomUtils.existsOne((node) => node.attribs.class?.split(" ").includes("lucide-link"), headingCopy.children)
+  || !DomUtils.existsOne((node) => node.attribs.class?.split(" ").includes("lucide-check"), headingCopy.children)) {
   throw new Error("tools index: heading ids should render copy-link buttons");
 }
 if (/<aside class="toc"[\s\S]*Copy link to section/.test(toolsIndex)) {
@@ -524,6 +573,13 @@ if (!/\.doc\{container-type:inline-size\}/.test(siteCss)
   || !/\.oc-card-grid\.oc-card-cols-4,\.oc-card-group\.oc-card-cols-4\{--oc-card-columns:4\}/.test(siteCss)
   || !/@container \(max-width:520px\)\{\.oc-card-grid,\.oc-card-group\{--oc-card-columns:1\}\}/.test(siteCss)) {
   throw new Error("assets: card column classes should use explicit column counts with responsive collapse");
+}
+if (!/@supports \(corner-shape: superellipse\(1\.5\)\)\{/.test(siteCss)
+  || !/:root\{--oc-corner-radius-scale:1\.25\}/.test(siteCss)
+  || !/\.oc-card\.oc-card,\.oc-cta-card\.oc-cta-card\{border-radius:calc\(var\(--oc-radius-lg\) \* var\(--oc-corner-radius-scale\)\);corner-shape:superellipse\(1\.5\)\}/.test(siteCss)
+  || !/\.page-tools \.page-actions-primary\.page-actions-primary\{[^}]*corner-shape:superellipse\(1\.5\)\}/.test(siteCss)
+  || !/@media\(min-width:821px\)\{\.community-invite\.community-invite\{[^}]*corner-shape:superellipse\(1\.5\)\}\}/.test(siteCss)) {
+  throw new Error("assets: continuous corner curvature is missing from cards and controls");
 }
 const elementsIndexPath = path.join(site, "__elements/index.html");
 if (!fs.existsSync(elementsIndexPath)) {
@@ -861,6 +917,41 @@ function assertEditSourceLinks() {
   assertEditSourceSample("de/channels/index.html", "https://github.com/openclaw/openclaw/edit/main/docs/channels/index.md");
   if (missingEdit > 0) {
     console.log(`edit source audit: ${missingEdit} page tool(s) intentionally have no edit source link`);
+  }
+}
+
+function assertLocalizedChrome() {
+  for (const locale of activeLocaleCodes()) {
+    const rel = `${locale === "en" ? "" : `${locale}/`}start/getting-started/index.html`;
+    const file = path.join(site, rel);
+    if (!fs.existsSync(file)) throw new Error(`chrome strings: missing rendered sample ${rel}`);
+    const document = parseDocument(fs.readFileSync(file, "utf8"));
+    const strings = chromeStrings[locale];
+    const byClass = (className) => DomUtils.findOne(
+      (node) => node.attribs?.class?.split(" ").includes(className),
+      document.children,
+    );
+    const text = (node) => DomUtils.textContent(node).trim();
+    const card = byClass("community-invite");
+    const image = byClass("community-invite__art");
+    const close = byClass("community-invite__close");
+    const title = byClass("community-invite__title");
+    const body = byClass("community-invite__text");
+    const cta = byClass("community-invite__cta");
+    const toc = byClass("toc");
+    const tocSummary = toc && DomUtils.findOne((node) => node.name === "summary", toc.children);
+    const tocHeading = toc && DomUtils.findOne((node) => node.name === "h2", toc.children);
+    if (card?.attribs["aria-label"] !== strings.communityLabel
+      || image?.attribs.alt !== strings.communityImageAlt
+      || close?.attribs["aria-label"] !== strings.communityDismissLabel
+      || text(title) !== strings.communityTitle
+      || text(body) !== strings.communityBody
+      || text(cta) !== strings.communityCta
+      || toc?.attribs["aria-label"] !== strings.onThisPage
+      || text(tocSummary) !== strings.onThisPage
+      || text(tocHeading) !== strings.onThisPage) {
+      throw new Error(`chrome strings: ${rel} did not render its locale table`);
+    }
   }
 }
 

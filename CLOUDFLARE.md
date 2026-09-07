@@ -36,7 +36,7 @@ Production is cut over to R2-backed storage with a small Worker router in front:
 - Routes: `docs.openclaw.ai/*`, `documentation.openclaw.ai/*`
 - Router storage: native `DOCS_BUCKET` R2 binding to bucket `openclaw-docs`
 - Header: `X-OpenClaw-Docs-Origin: cloudflare-r2`
-- Cache-Control follows the same policy as the R2 manifest.
+- The Worker applies the runtime cache policy below over the R2 object's metadata.
 
 Why a Worker still exists:
 
@@ -54,7 +54,7 @@ The old Worker Static Assets build remains the rollback path in git history.
 
 Cloudflare account:
 
-- account: `Services@openclaw.org`
+- account: the OpenClaw deployment account
 - account id: stored in the private `CLOUDFLARE_ACCOUNT_ID` secret/local environment variable
 - zone: `openclaw.ai`
 
@@ -94,12 +94,16 @@ Production docs object deploy:
 3. `npm run docs:smoke`
 4. `npm run docs:r2:upload`
 
+The global `r2-pages` queue serializes admission, build, and publication. After scope classification and any page/locale content refresh from main, the workflow checks freshness before source checkout, dependency installation, and build. Artifact-relevant stale snapshots yield to an existing successor run or dispatch a full successor when none exists; stale scoped translation dispatches fail so callers retry. Artifact-unaffected drift is admitted. Once admitted, the job publishes that snapshot even if main advances during the build; there is no second freshness veto before upload. Page/locale dispatches retain their selected workflow code and existing partial-upload boundaries, using the refreshed docs and source metadata throughout the build.
+
+After successful R2 publication (or a Worker-only deployment), the same head/successor helper checks main again and dispatches a full successor for artifact-relevant drift with no verified run. This catches changes whose push did not trigger R2, including `GITHUB_TOKEN` and skip-ci pushes during the build. API lookup failure biases to dispatch; dispatch failure fails the job without undoing publication. Catch-up also runs if live-smoke scheduling failed after publication. It never changes the admission verdict or gates the completed upload. This ordering applies to the automatic R2 queue without relying on FIFO ordering; manual Pages router deployment remains operator-owned outside that queue.
+
 Production router deploy:
 
-1. `.github/workflows/pages.yml`
-2. Pushes validate the Worker bundle with `wrangler deploy --dry-run`.
-3. Manual dispatch with `deploy_worker=true` runs `npx wrangler@4.118.0 deploy --config wrangler.toml`.
-4. `docs-live-smoke.yml`
+1. On a main push that changes `workers/**` or `wrangler.toml`, `r2-pages.yml` deploys the matching Worker after any required R2 upload, provided that snapshot passed admission before the build.
+2. `pages.yml` pushes validate the Worker bundle with `wrangler deploy --dry-run`; they do not deploy it.
+3. Manual `pages.yml` dispatch with `deploy_worker=true` deploys the router using the workflow's pinned Wrangler version. Leave `cutover_docs_hosts=false` for an ordinary router update.
+4. Successful deployments dispatch `docs-live-smoke.yml`. Verify the actual upload and Worker deployment steps, not just a green workflow that skipped a stale snapshot. If a docs-only successor uploads the artifact without deploying the changed Worker, use the manual router dispatch.
 
 Local R2 build:
 
@@ -132,6 +136,20 @@ The generated R2 manifest uploads both canonical files and slashless aliases:
 
 The Worker router preserves `Accept: text/markdown` negotiation and root `/` behavior while reading objects from R2 through the bucket binding. Pure R2 custom-domain serving still needs Cloudflare URL rewrite/redirect rules.
 
+### Markdown for page aliases
+
+Central `docs.json` internal page aliases support explicit `.md` requests and negotiation with `text/markdown`, `text/x-markdown`, or `application/markdown`. After a Markdown object miss, the Worker reads the HTML alias's current R2 metadata and serves the published canonical Markdown object as HTTP `200 text/markdown` in the first response. GET returns the whole exact canonical document, including frontmatter and every section, even when the HTML destination has an anchor. HEAD returns `200` with no body. Both include `Vary: Accept` and no `Location`; a plain `curl -fsS https://docs.openclaw.ai/refactor/database-first.md` receives readable content without `-L`. Existing Markdown objects, including migration stubs, take precedence through the normal asset lookup. Emitted compatibility aliases use their configured target even when the unprefixed URL has a source stub. HTML aliases remain HTML with a Markdown alternate Link that serves the canonical content.
+
+The builder resolves chains to actual published pages, preferring a translated target when present and otherwise falling back to English. Explicit locale alias prefixes are preserved; targets use their actual published locale routes. HTML destinations keep their configured queries and anchors. Markdown body lookup uses only the canonical pathname, ignoring destination and incoming queries and fragments; it never extracts an anchored section. Compatibility aliases under `/docs` and `DOCS_SITE_BASE_PATH` use the actual Markdown object without adding a hosting prefix. Dotted canonical pages and aliases such as `reference/AGENTS.default` and `AGENTS.default` negotiate all three Markdown media types on GET and HEAD when the current R2 object is HTML. Literal and percent-encoded dots use the same decoded object identity for ownership and cache policy while retaining the requested URL spelling and query in cache keys. Static objects remain static even if a same-named `.md` companion exists. Explicit `.html` requests do not negotiate. Accept matching still ignores quality weights; base-prefixed canonical pages and locale-root negotiation retain their existing limitations.
+
+The build writes deterministic `dist/docs-markdown-redirects.json` outside the served output and clears it at every build, including preview builds. R2 preparation validates that each canonical Markdown object exists and attaches `openclaw-markdown-target` custom metadata to emitted redirect `index.html` objects and their slashless aliases. This sidecar is a build input, not a public object or request-time manifest. The uploader compares and HEAD-audits this field independently of HTML hashes and ETags, including metadata removal. Shell publishes include HTML aliases; page and locale publishes also include aliases whose current or previous Markdown target belongs to the selected page or locale, including compatibility prefixes. This refreshes aliases when translations appear or fall back to English.
+
+Conflicting rules, cycles without a terminal source page, missing internal page targets, wildcard rules, unsafe paths, and unsupported URL schemes fail the build with a diagnostic. HTTP(S), protocol-relative external destinations, and non-page file destinations retain HTML redirects without Markdown metadata. Their Markdown requests retain the existing miss/HTML fallback behavior. No alias Markdown files are synthesized.
+
+The Worker reads alias metadata directly on every Markdown object miss, even when canonical Markdown is cached. Dotted negotiation first checks current HTML ownership with R2 HEAD and reuses that response for alias metadata or a bodyless HTML/static fallback. Real Markdown objects still take precedence over alias targets. Canonical bodies use the existing asset cache under their canonical path; the Worker never stores the served body under the missing alias Markdown key. HTML responses at negotiable URLs include `Vary: Accept`, preserving other Vary values, and retain their Markdown alternate Link. Updated alias metadata selects the current canonical target without invalidating unrelated cached documents.
+
+Rollout requires **both the rebuilt R2 artifact and the matching Worker**: publish a full artifact with canonical Markdown objects and redirect metadata, then deploy the Worker. The R2 workflow uploads before its Worker deployment; the manual Pages workflow can deploy the Worker separately. Deploying the Worker alone cannot repair aliases without metadata. Source retirement also requires removal of the old real Markdown object; its normal cache lifetime still applies. Missing metadata preserves the earlier explicit miss or negotiated HTML fallback during rollout. After deployment, verify explicit and negotiated GET/HEAD without following redirects: require `200`, Markdown MIME, `Vary: Accept`, no `Location`, exact canonical GET bytes and an empty HEAD body. Verify HTML queries and anchors independently, and check a metadata target change after prior HTML and Markdown requests. Building and testing locally does not publish or deploy either part.
+
 ## Cache Policy
 
 `r2-prepare.mjs` assigns per-object `Cache-Control`:
@@ -145,25 +163,25 @@ The Worker router splits browser and edge cache headers so cached HTML does not 
 
 - HTML and slashless HTML aliases:
   - `Cache-Control: public, max-age=60, stale-while-revalidate=60`
-  - `CDN-Cache-Control` / `Cloudflare-CDN-Cache-Control: public, s-maxage=86400, stale-while-revalidate=604800`
+  - `CDN-Cache-Control` / `Cloudflare-CDN-Cache-Control: public, s-maxage=60, stale-while-revalidate=60`
 - markdown, JSON, JSONL, and text indexes:
   - `Cache-Control: public, max-age=300, stale-while-revalidate=300`
   - `CDN-Cache-Control` / `Cloudflare-CDN-Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400`
 - hashed/static assets:
   - `Cache-Control: public, max-age=31536000, immutable`
 
-The Worker also uses `caches.default` for production router responses. Recommended Cloudflare cache rules for the later pure-R2 path:
+The Worker does not write HTML to `caches.default` and ignores older entries labeled HTML, including dotted aliases cached with obsolete year-immutable headers. Current R2 HTML receives the 60-second runtime policies above. Dotted Markdown negotiation verifies current R2 ownership even with warm caches; it adds one HEAD and never probes a Markdown companion for a proven static object. Ordinary warm static GETs retain their Worker cache HIT with no new R2 reads, and explicit canonical `.md` GETs retain their existing cache behavior. This bounded contract does not detect arbitrary static-to-HTML transitions on ordinary warm non-HTML cache hits, invalidate downstream clients already holding immutable content, or change existing TTLs. These are router behavior guarantees after deploying the change, not a claim of deployment or a cache purge. Recommended Cloudflare cache rules for the later pure-R2 path:
 
 1. Cache static assets and Pagefind files for one year.
 2. Cache HTML at the edge for one day with short browser TTL.
 3. Cache `.md`, `.txt`, `.json`, and `.jsonl` for one hour at the edge.
 4. Bypass cache for `/ask-molty/*`.
 
-After router deploy, verify repeated requests show `X-OpenClaw-Docs-Cache: MISS` then `HIT`. After pure-R2 ruleset cutover, verify repeated requests show `cf-cache-status: MISS` then `HIT`.
+After router deploy, verify repeated HTML requests remain `X-OpenClaw-Docs-Cache: MISS` and repeated static or markdown requests show `MISS` then `HIT`. After pure-R2 ruleset cutover, verify repeated requests show `cf-cache-status: MISS` then `HIT`.
 
 ## Cutover Checklist
 
-1. Confirm R2 is enabled on the Services@openclaw.org account.
+1. Confirm R2 is enabled on the OpenClaw deployment account.
 2. Confirm the GitHub Cloudflare secrets are present:
    - `CLOUDFLARE_ACCOUNT_ID`
    - `CLOUDFLARE_API_TOKEN`
@@ -173,7 +191,7 @@ After router deploy, verify repeated requests show `X-OpenClaw-Docs-Cache: MISS`
    source ~/.profile
    CLOUDFLARE_ACCOUNT_ID="$CLOUDFLARE_ACCOUNT_ID" \
    CLOUDFLARE_API_TOKEN="$OPENCLAW_CLOUDFLARE_API_TOKEN" \
-   npx wrangler@4.118.0 r2 bucket list
+   npx wrangler@4.119.0 r2 bucket list
    ```
 
 4. Run the manual `R2 Pages` workflow, or run the local upload command above.
@@ -244,7 +262,7 @@ If R2 cutover misbehaves:
 
    ```sh
    source ~/.profile
-   CLOUDFLARE_API_TOKEN="$CRABBOX_CLOUDFLARE_API_TOKEN" npx wrangler@4.118.0 deploy --config wrangler.toml
+   CLOUDFLARE_API_TOKEN="$CRABBOX_CLOUDFLARE_API_TOKEN" npx wrangler@4.119.0 deploy --config wrangler.toml
    ```
 
 3. Purge Cloudflare cache.

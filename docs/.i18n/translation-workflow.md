@@ -13,9 +13,9 @@ Internal note for the docs publish pipeline. This file is under `docs/.i18n`, wh
 
 ## Event flow
 
-1. `openclaw/openclaw` syncs English docs into `openclaw/docs`.
+1. `openclaw/openclaw/.github/workflows/docs-sync-publish.yml` mirrors the OpenClaw docs tree into `openclaw/docs`, then replaces `docs/clawhub/` with the current `openclaw/clawhub/docs` input. The sync script also rewrites the publish `docs/docs.json`. The generated locale picker blocks exist there even though the source repo no longer commits them.
 2. GitHub Pages deploys English/source changes immediately from the sync commit.
-3. `Translate All` is triggered by the sync commit, release dispatch, manual dispatch, or weekly schedule.
+3. `Translate All` (`openclaw/docs/.github/workflows/translate-all.yml`) is triggered by the sync commit, release dispatch, manual dispatch, or weekly schedule.
 4. The coordinator waits a cooldown window before starting translation.
 5. After the cooldown, the coordinator reads the current `origin/main` source metadata.
 6. If a newer docs sync arrived during cooldown, the coordinator uses the newer source state.
@@ -69,16 +69,13 @@ payload/docs/.i18n/<locale>.tm.jsonl
 
 `metadata.json` includes the locale, locale slug, source SHA, pending count, changed count, and any failure reason. The finalizer rejects artifacts whose `source_sha` does not match the current `.openclaw-sync/source.json`.
 
-### MDX repair chain
-
-The packaging path currently contains two deterministic repair stages:
-
-1. Syntax repair (`repair_mdx_syntax.mjs`): if a page no longer passes the repair chain's MDX parse, the parser is re-run in a bounded loop and each reported diagnostic is patched minimally — fabricated elements absent from the source are removed, missing or stray closing tags are resynced, void elements are self-closed, unquoted attribute values are quoted, and unterminated comments are closed. Markdown comments and prose less-than tokens are accepted untouched (the chain's tolerant parser already allows them), so translated prose is preserved. Unresolvable damage still fails the shard with a parser-backed reason.
-2. Protected-attribute repair (`repair_mdx_protected_attributes.mjs`): re-syncs protected attributes (`className`, `id`, `path`, `type`, `default`, `aria-hidden`, `target`, `rel`) byte-for-byte from the source page.
-
-Both stages only rewrite markup tokens; the final `check-docs-mdx` gate still validates every packaged page.
-
 The source repo release workflow dispatches one `translate-all-release` event. The coordinator still accepts old per-locale release events for compatibility, but those are only a fallback.
+
+### MDX syntax recovery
+
+Before validating translated MDX, the locale worker runs a deterministic syntax repair over the pending manifest. It uses the same tolerant MDX parser as validation, preserving valid Markdown comments, code examples, and prose less-than signs. Parser-diagnosed markup damage can be repaired in at most 64 edits per page: mismatched closing tags for source-backed elements, non-self-closing void elements, and unquoted attributes. Every changed document must retain the source's element nesting and attribute names and forms. Unknown tags, missing or unmatched closers, unterminated comments, and broken JavaScript expressions are left for the existing repair path; an apparent tag may be a meaningful literal placeholder whose backticks were lost.
+
+The script prepares all repairs in memory before writing, and writes only pending locale pages. Pages containing JSX inside JavaScript expressions or attributes require the existing model repair because their element structure is outside the deterministic repair's scope. If any page cannot be repaired, none of the prepared repairs are written. The existing validation still runs after a failed attempt and selects the existing model repair when needed. Protected-attribute repair and shard publication checks remain mandatory; failed shards still produce empty artifacts for later reconciliation. No new model calls, relay rounds, canary controls, or partial-page publication are introduced.
 
 ## Aggregate commit
 
