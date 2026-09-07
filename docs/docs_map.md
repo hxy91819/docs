@@ -10507,6 +10507,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: Source in session history
   - H2: wait
   - H2: Guest runtime API
+  - H3: Reading paginated file data
   - H2: Declared output contracts
   - H2: Output API
   - H2: Tool catalog
