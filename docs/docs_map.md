@@ -7734,6 +7734,14 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Surface
   - H2: Related docs
 
+## plugins/reference/team-reports.md
+
+- Route: /plugins/reference/team-reports
+- Headings:
+  - H2: Distribution
+  - H2: Surface
+  - H2: Related docs
+
 ## plugins/reference/teams-meetings.md
 
 - Route: /plugins/reference/teams-meetings
@@ -8210,6 +8218,23 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Lint enforcement (in-repo plugins)
   - H2: Test configuration
   - H2: Related
+
+## plugins/team-reports.md
+
+- Route: /plugins/team-reports
+- Headings:
+  - H2: Before you begin
+  - H2: Install and enable Team Reports
+  - H2: Read reports in the Control UI
+  - H2: Configuration
+  - H3: GitHub
+  - H3: Discord
+  - H3: People and identity
+  - H3: Summaries
+  - H3: Schedule
+  - H2: Understand report windows and counts
+  - H2: CLI and exports
+  - H2: Troubleshooting
 
 ## plugins/teams-meetings.md
 
