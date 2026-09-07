@@ -5774,6 +5774,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Multiple gateways
   - H2: Computer Use relationship
   - H2: Voice wake + talk mode
+  - H3: Start live voice with Siri or Shortcuts
   - H2: Common errors
   - H2: Related docs
 
