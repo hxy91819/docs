@@ -9371,6 +9371,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: Heartbeat keep-warm
   - H2: Provider behavior
   - H3: Anthropic (direct API and Vertex AI)
+  - H3: DeepInfra
   - H3: Model Studio / DashScope (Qwen)
   - H3: OpenAI (direct API)
   - H3: Amazon Bedrock
@@ -9378,6 +9379,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: Google Gemini (direct API)
   - H3: CLI-harness providers (Claude Code, Gemini CLI)
   - H3: Other providers
+  - H2: Chat Completions cache markers
   - H2: System-prompt cache boundary
   - H2: OpenClaw cache-stability guards
   - H2: Tuning patterns
