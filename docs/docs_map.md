@@ -6013,6 +6013,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
 
 - Route: /platforms/macos
 - Headings:
+  - H2: Requirements
   - H2: Download
   - H2: First run
   - H2: Connection
@@ -11457,6 +11458,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
 - Headings:
   - H2: Quick open (local)
   - H2: What each page covers
+  - H2: Where each section moved
   - H2: Related
 
 ## web/control-ui/chat.md
