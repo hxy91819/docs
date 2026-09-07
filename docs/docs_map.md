@@ -5319,6 +5319,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
 - Route: /install/updating
 - Headings:
   - H2: Recommended: openclaw update
+  - H3: Updating from 2026.9.2 across a schema bump
   - H3: From chat
   - H2: Retire update recovery data
   - H2: Switch between npm and git installs
@@ -9267,6 +9268,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: Update run ledger
   - H3: Cloud repository workspaces
   - H2: Versioning contract
+  - H3: Schema bumps and older updaters
   - H3: Profile-owned skill library
   - H2: Personal GitHub connections and publication
   - H2: Personal model accounts
