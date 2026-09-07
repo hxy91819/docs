@@ -3223,6 +3223,15 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: Commentary progress lane
   - H2: Related
 
+## concepts/subagent-yield-handoff.md
+
+- Route: /concepts/subagent-yield-handoff
+- Headings:
+  - H1: Subagent yield handoff
+  - H2: Ownership through the handoff
+  - H2: Invariants
+  - H2: Progress after yield
+
 ## concepts/system-prompt.md
 
 - Route: /concepts/system-prompt
