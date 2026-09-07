@@ -386,6 +386,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Interactive components
   - H2: Access control and routing
   - H3: Guild channel maps are allowlists
+  - H3: Applying access-policy changes
   - H3: Role-based agent routing
   - H2: Native commands and command auth
   - H2: Feature details
@@ -8045,6 +8046,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: Durable ingress and replay dedupe
   - H4: Transport classes and retention
   - H4: At-least-once side effects
+  - H4: Dynamic policy publication
   - H4: Account-scoped restart contract
   - H3: Runtime lifecycle status
   - H3: Typing indicators
