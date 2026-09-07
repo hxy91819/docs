@@ -1231,6 +1231,106 @@
     {
       "source": "/web/control-ui/updates",
       "destination": "/web/control-ui/settings#updates"
+    },
+    {
+      "source": "/ci/pipeline-overview",
+      "destination": "/ci/pipeline#pipeline-overview"
+    },
+    {
+      "source": "/ci/fail-fast-order",
+      "destination": "/ci/pipeline#fail-fast-order"
+    },
+    {
+      "source": "/ci/control-ui-size-budgets",
+      "destination": "/ci/pipeline#control-ui-size-budgets"
+    },
+    {
+      "source": "/ci/watching-pull-request-ci",
+      "destination": "/ci/watching-runs#watching-pull-request-ci"
+    },
+    {
+      "source": "/ci/pr-context-and-evidence",
+      "destination": "/ci/watching-runs#pr-context-and-evidence"
+    },
+    {
+      "source": "/ci/checkout-ownership",
+      "destination": "/ci/checkout#checkout-ownership"
+    },
+    {
+      "source": "/ci/measured-shard-weights",
+      "destination": "/ci/capacity#measured-shard-weights"
+    },
+    {
+      "source": "/ci/clawsweeper-activity-forwarding",
+      "destination": "/ci/scheduled-workflows#clawsweeper-activity-forwarding"
+    },
+    {
+      "source": "/ci/manual-dispatches",
+      "destination": "/ci/scope-and-routing#manual-dispatches"
+    },
+    {
+      "source": "/ci/runner-registration-budget",
+      "destination": "/ci/capacity#runner-registration-budget"
+    },
+    {
+      "source": "/ci/surface-ratchets",
+      "destination": "/ci/local-proof#surface-ratchets"
+    },
+    {
+      "source": "/ci/local-equivalents",
+      "destination": "/ci/local-proof#local-equivalents"
+    },
+    {
+      "source": "/ci/openclaw-performance",
+      "destination": "/ci/scheduled-workflows#openclaw-performance"
+    },
+    {
+      "source": "/ci/full-release-validation",
+      "destination": "/ci/release-validation#full-release-validation"
+    },
+    {
+      "source": "/ci/live-and-e2e-shards",
+      "destination": "/ci/release-validation#live-and-e2e-shards"
+    },
+    {
+      "source": "/ci/package-acceptance",
+      "destination": "/ci/release-validation#package-acceptance"
+    },
+    {
+      "source": "/ci/install-smoke",
+      "destination": "/ci/release-validation#install-smoke"
+    },
+    {
+      "source": "/ci/local-docker-e2e",
+      "destination": "/ci/release-validation#local-docker-e2e"
+    },
+    {
+      "source": "/ci/plugin-prerelease",
+      "destination": "/ci/release-validation#plugin-prerelease"
+    },
+    {
+      "source": "/ci/qa-lab",
+      "destination": "/ci/scheduled-workflows#qa-lab"
+    },
+    {
+      "source": "/ci/codeql",
+      "destination": "/ci/scheduled-workflows#codeql"
+    },
+    {
+      "source": "/ci/maintenance-workflows",
+      "destination": "/ci/scheduled-workflows#maintenance-workflows"
+    },
+    {
+      "source": "/ci/local-check-gates-and-changed-routing",
+      "destination": "/ci/local-proof#local-check-gates-and-changed-routing"
+    },
+    {
+      "source": "/ci/testbox-validation",
+      "destination": "/ci/local-proof#testbox-validation"
+    },
+    {
+      "source": "/ci/runner-backend-modes",
+      "destination": "/ci/runners#runner-backend-modes"
     }
   ],
   "navigation": {
@@ -2420,6 +2520,20 @@
                 "pages": [
                   "reference/test",
                   "ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "ci/pipeline",
+                      "ci/watching-runs",
+                      "ci/checkout",
+                      "ci/scope-and-routing",
+                      "ci/runners",
+                      "ci/capacity",
+                      "ci/release-validation",
+                      "ci/scheduled-workflows",
+                      "ci/local-proof"
+                    ]
+                  },
                   "help/scripts",
                   "concepts/qa-e2e-automation",
                   "concepts/personal-agent-benchmark-pack"
@@ -3624,6 +3738,20 @@
                 "pages": [
                   "zh-CN/reference/test",
                   "zh-CN/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "zh-CN/ci/pipeline",
+                      "zh-CN/ci/watching-runs",
+                      "zh-CN/ci/checkout",
+                      "zh-CN/ci/scope-and-routing",
+                      "zh-CN/ci/runners",
+                      "zh-CN/ci/capacity",
+                      "zh-CN/ci/release-validation",
+                      "zh-CN/ci/scheduled-workflows",
+                      "zh-CN/ci/local-proof"
+                    ]
+                  },
                   "zh-CN/help/scripts",
                   "zh-CN/concepts/qa-e2e-automation",
                   "zh-CN/concepts/personal-agent-benchmark-pack"
@@ -4828,6 +4956,20 @@
                 "pages": [
                   "zh-TW/reference/test",
                   "zh-TW/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "zh-TW/ci/pipeline",
+                      "zh-TW/ci/watching-runs",
+                      "zh-TW/ci/checkout",
+                      "zh-TW/ci/scope-and-routing",
+                      "zh-TW/ci/runners",
+                      "zh-TW/ci/capacity",
+                      "zh-TW/ci/release-validation",
+                      "zh-TW/ci/scheduled-workflows",
+                      "zh-TW/ci/local-proof"
+                    ]
+                  },
                   "zh-TW/help/scripts",
                   "zh-TW/concepts/qa-e2e-automation",
                   "zh-TW/concepts/personal-agent-benchmark-pack"
@@ -6032,6 +6174,20 @@
                 "pages": [
                   "ja-JP/reference/test",
                   "ja-JP/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "ja-JP/ci/pipeline",
+                      "ja-JP/ci/watching-runs",
+                      "ja-JP/ci/checkout",
+                      "ja-JP/ci/scope-and-routing",
+                      "ja-JP/ci/runners",
+                      "ja-JP/ci/capacity",
+                      "ja-JP/ci/release-validation",
+                      "ja-JP/ci/scheduled-workflows",
+                      "ja-JP/ci/local-proof"
+                    ]
+                  },
                   "ja-JP/help/scripts",
                   "ja-JP/concepts/qa-e2e-automation",
                   "ja-JP/concepts/personal-agent-benchmark-pack"
@@ -7236,6 +7392,20 @@
                 "pages": [
                   "es/reference/test",
                   "es/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "es/ci/pipeline",
+                      "es/ci/watching-runs",
+                      "es/ci/checkout",
+                      "es/ci/scope-and-routing",
+                      "es/ci/runners",
+                      "es/ci/capacity",
+                      "es/ci/release-validation",
+                      "es/ci/scheduled-workflows",
+                      "es/ci/local-proof"
+                    ]
+                  },
                   "es/help/scripts",
                   "es/concepts/qa-e2e-automation",
                   "es/concepts/personal-agent-benchmark-pack"
@@ -8440,6 +8610,20 @@
                 "pages": [
                   "pt-BR/reference/test",
                   "pt-BR/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "pt-BR/ci/pipeline",
+                      "pt-BR/ci/watching-runs",
+                      "pt-BR/ci/checkout",
+                      "pt-BR/ci/scope-and-routing",
+                      "pt-BR/ci/runners",
+                      "pt-BR/ci/capacity",
+                      "pt-BR/ci/release-validation",
+                      "pt-BR/ci/scheduled-workflows",
+                      "pt-BR/ci/local-proof"
+                    ]
+                  },
                   "pt-BR/help/scripts",
                   "pt-BR/concepts/qa-e2e-automation",
                   "pt-BR/concepts/personal-agent-benchmark-pack"
@@ -9644,6 +9828,20 @@
                 "pages": [
                   "ko/reference/test",
                   "ko/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "ko/ci/pipeline",
+                      "ko/ci/watching-runs",
+                      "ko/ci/checkout",
+                      "ko/ci/scope-and-routing",
+                      "ko/ci/runners",
+                      "ko/ci/capacity",
+                      "ko/ci/release-validation",
+                      "ko/ci/scheduled-workflows",
+                      "ko/ci/local-proof"
+                    ]
+                  },
                   "ko/help/scripts",
                   "ko/concepts/qa-e2e-automation",
                   "ko/concepts/personal-agent-benchmark-pack"
@@ -10848,6 +11046,20 @@
                 "pages": [
                   "de/reference/test",
                   "de/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "de/ci/pipeline",
+                      "de/ci/watching-runs",
+                      "de/ci/checkout",
+                      "de/ci/scope-and-routing",
+                      "de/ci/runners",
+                      "de/ci/capacity",
+                      "de/ci/release-validation",
+                      "de/ci/scheduled-workflows",
+                      "de/ci/local-proof"
+                    ]
+                  },
                   "de/help/scripts",
                   "de/concepts/qa-e2e-automation",
                   "de/concepts/personal-agent-benchmark-pack"
@@ -12052,6 +12264,20 @@
                 "pages": [
                   "fr/reference/test",
                   "fr/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "fr/ci/pipeline",
+                      "fr/ci/watching-runs",
+                      "fr/ci/checkout",
+                      "fr/ci/scope-and-routing",
+                      "fr/ci/runners",
+                      "fr/ci/capacity",
+                      "fr/ci/release-validation",
+                      "fr/ci/scheduled-workflows",
+                      "fr/ci/local-proof"
+                    ]
+                  },
                   "fr/help/scripts",
                   "fr/concepts/qa-e2e-automation",
                   "fr/concepts/personal-agent-benchmark-pack"
@@ -13256,6 +13482,20 @@
                 "pages": [
                   "hi/reference/test",
                   "hi/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "hi/ci/pipeline",
+                      "hi/ci/watching-runs",
+                      "hi/ci/checkout",
+                      "hi/ci/scope-and-routing",
+                      "hi/ci/runners",
+                      "hi/ci/capacity",
+                      "hi/ci/release-validation",
+                      "hi/ci/scheduled-workflows",
+                      "hi/ci/local-proof"
+                    ]
+                  },
                   "hi/help/scripts",
                   "hi/concepts/qa-e2e-automation",
                   "hi/concepts/personal-agent-benchmark-pack"
@@ -14460,6 +14700,20 @@
                 "pages": [
                   "ar/reference/test",
                   "ar/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "ar/ci/pipeline",
+                      "ar/ci/watching-runs",
+                      "ar/ci/checkout",
+                      "ar/ci/scope-and-routing",
+                      "ar/ci/runners",
+                      "ar/ci/capacity",
+                      "ar/ci/release-validation",
+                      "ar/ci/scheduled-workflows",
+                      "ar/ci/local-proof"
+                    ]
+                  },
                   "ar/help/scripts",
                   "ar/concepts/qa-e2e-automation",
                   "ar/concepts/personal-agent-benchmark-pack"
@@ -15664,6 +15918,20 @@
                 "pages": [
                   "it/reference/test",
                   "it/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "it/ci/pipeline",
+                      "it/ci/watching-runs",
+                      "it/ci/checkout",
+                      "it/ci/scope-and-routing",
+                      "it/ci/runners",
+                      "it/ci/capacity",
+                      "it/ci/release-validation",
+                      "it/ci/scheduled-workflows",
+                      "it/ci/local-proof"
+                    ]
+                  },
                   "it/help/scripts",
                   "it/concepts/qa-e2e-automation",
                   "it/concepts/personal-agent-benchmark-pack"
@@ -16868,6 +17136,20 @@
                 "pages": [
                   "vi/reference/test",
                   "vi/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "vi/ci/pipeline",
+                      "vi/ci/watching-runs",
+                      "vi/ci/checkout",
+                      "vi/ci/scope-and-routing",
+                      "vi/ci/runners",
+                      "vi/ci/capacity",
+                      "vi/ci/release-validation",
+                      "vi/ci/scheduled-workflows",
+                      "vi/ci/local-proof"
+                    ]
+                  },
                   "vi/help/scripts",
                   "vi/concepts/qa-e2e-automation",
                   "vi/concepts/personal-agent-benchmark-pack"
@@ -18072,6 +18354,20 @@
                 "pages": [
                   "nl/reference/test",
                   "nl/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "nl/ci/pipeline",
+                      "nl/ci/watching-runs",
+                      "nl/ci/checkout",
+                      "nl/ci/scope-and-routing",
+                      "nl/ci/runners",
+                      "nl/ci/capacity",
+                      "nl/ci/release-validation",
+                      "nl/ci/scheduled-workflows",
+                      "nl/ci/local-proof"
+                    ]
+                  },
                   "nl/help/scripts",
                   "nl/concepts/qa-e2e-automation",
                   "nl/concepts/personal-agent-benchmark-pack"
@@ -19276,6 +19572,20 @@
                 "pages": [
                   "tr/reference/test",
                   "tr/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "tr/ci/pipeline",
+                      "tr/ci/watching-runs",
+                      "tr/ci/checkout",
+                      "tr/ci/scope-and-routing",
+                      "tr/ci/runners",
+                      "tr/ci/capacity",
+                      "tr/ci/release-validation",
+                      "tr/ci/scheduled-workflows",
+                      "tr/ci/local-proof"
+                    ]
+                  },
                   "tr/help/scripts",
                   "tr/concepts/qa-e2e-automation",
                   "tr/concepts/personal-agent-benchmark-pack"
@@ -20480,6 +20790,20 @@
                 "pages": [
                   "uk/reference/test",
                   "uk/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "uk/ci/pipeline",
+                      "uk/ci/watching-runs",
+                      "uk/ci/checkout",
+                      "uk/ci/scope-and-routing",
+                      "uk/ci/runners",
+                      "uk/ci/capacity",
+                      "uk/ci/release-validation",
+                      "uk/ci/scheduled-workflows",
+                      "uk/ci/local-proof"
+                    ]
+                  },
                   "uk/help/scripts",
                   "uk/concepts/qa-e2e-automation",
                   "uk/concepts/personal-agent-benchmark-pack"
@@ -21684,6 +22008,20 @@
                 "pages": [
                   "id/reference/test",
                   "id/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "id/ci/pipeline",
+                      "id/ci/watching-runs",
+                      "id/ci/checkout",
+                      "id/ci/scope-and-routing",
+                      "id/ci/runners",
+                      "id/ci/capacity",
+                      "id/ci/release-validation",
+                      "id/ci/scheduled-workflows",
+                      "id/ci/local-proof"
+                    ]
+                  },
                   "id/help/scripts",
                   "id/concepts/qa-e2e-automation",
                   "id/concepts/personal-agent-benchmark-pack"
@@ -22888,6 +23226,20 @@
                 "pages": [
                   "pl/reference/test",
                   "pl/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "pl/ci/pipeline",
+                      "pl/ci/watching-runs",
+                      "pl/ci/checkout",
+                      "pl/ci/scope-and-routing",
+                      "pl/ci/runners",
+                      "pl/ci/capacity",
+                      "pl/ci/release-validation",
+                      "pl/ci/scheduled-workflows",
+                      "pl/ci/local-proof"
+                    ]
+                  },
                   "pl/help/scripts",
                   "pl/concepts/qa-e2e-automation",
                   "pl/concepts/personal-agent-benchmark-pack"
@@ -24092,6 +24444,20 @@
                 "pages": [
                   "ru/reference/test",
                   "ru/ci",
+                  {
+                    "group": "CI",
+                    "pages": [
+                      "ru/ci/pipeline",
+                      "ru/ci/watching-runs",
+                      "ru/ci/checkout",
+                      "ru/ci/scope-and-routing",
+                      "ru/ci/runners",
+                      "ru/ci/capacity",
+                      "ru/ci/release-validation",
+                      "ru/ci/scheduled-workflows",
+                      "ru/ci/local-proof"
+                    ]
+                  },
                   "ru/help/scripts",
                   "ru/concepts/qa-e2e-automation",
                   "ru/concepts/personal-agent-benchmark-pack"

@@ -1236,26 +1236,48 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
 
 - Route: /ci
 - Headings:
+  - H2: Where each section moved
+  - H2: Related
+
+## ci/capacity.md
+
+- Route: /ci/capacity
+- Headings:
+  - H2: Runner registration budget
+  - H2: Measured shard weights
+  - H2: Related
+
+## ci/checkout.md
+
+- Route: /ci/checkout
+- Headings:
+  - H2: Checkout ownership
+  - H2: Related
+
+## ci/local-proof.md
+
+- Route: /ci/local-proof
+- Headings:
+  - H2: Local equivalents
+  - H2: Surface ratchets
+  - H2: Local check gates and changed routing
+  - H3: Config baseline count ratchet
+  - H2: Testbox validation
+  - H2: Related
+
+## ci/pipeline.md
+
+- Route: /ci/pipeline
+- Headings:
   - H2: Pipeline overview
   - H2: Fail-fast order
   - H2: Control UI size budgets
-  - H2: Watching pull request CI
-  - H3: Recover an existing PR run first
-  - H2: PR context and evidence
-  - H2: Checkout ownership
-  - H2: Scope and routing
-  - H2: Measured shard weights
-  - H2: ClawSweeper activity forwarding
-  - H2: Manual dispatches
-  - H3: Windows Testbox Probe
-  - H2: Runners
-  - H3: Blacksmith runner capacity
-  - H3: Runner backend modes
-  - H2: Runner registration budget
-  - H2: Surface ratchets
-  - H2: Local equivalents
-  - H2: OpenClaw Performance
-  - H3: Vitest paired benchmark
+  - H2: Related
+
+## ci/release-validation.md
+
+- Route: /ci/release-validation
+- Headings:
   - H2: Full Release Validation
   - H2: Live and E2E shards
   - H2: Package Acceptance
@@ -1270,6 +1292,23 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: Reusable live/E2E workflow
   - H3: Release-path chunks
   - H2: Plugin Prerelease
+  - H2: Related
+
+## ci/runners.md
+
+- Route: /ci/runners
+- Headings:
+  - H2: Runners
+  - H3: Blacksmith runner capacity
+  - H3: Runner backend modes
+  - H2: Related
+
+## ci/scheduled-workflows.md
+
+- Route: /ci/scheduled-workflows
+- Headings:
+  - H2: OpenClaw Performance
+  - H3: Vitest paired benchmark
   - H2: QA Lab
   - H2: CodeQL
   - H3: Security categories
@@ -1279,9 +1318,25 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: Dependency Audit
   - H3: Docs Agent
   - H3: Duplicate PRs After Merge
-  - H2: Local check gates and changed routing
-  - H3: Config baseline count ratchet
-  - H2: Testbox validation
+  - H2: ClawSweeper activity forwarding
+  - H2: Related
+
+## ci/scope-and-routing.md
+
+- Route: /ci/scope-and-routing
+- Headings:
+  - H2: Scope and routing
+  - H2: Manual dispatches
+  - H3: Windows Testbox Probe
+  - H2: Related
+
+## ci/watching-runs.md
+
+- Route: /ci/watching-runs
+- Headings:
+  - H2: Watching pull request CI
+  - H3: Recover an existing PR run first
+  - H2: PR context and evidence
   - H2: Related
 
 ## cli/acp.md
